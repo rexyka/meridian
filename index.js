@@ -427,9 +427,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     // Load active strategy
     const activeStrategy = getActiveStrategy();
+    const defaultBinsAbove = config.strategy.defaultBinsAbove ?? 0;
+    const maxBinsAbove = config.strategy.maxBinsAbove ?? 20;
     const strategyBlock = activeStrategy
-      ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
-      : `No active strategy — use strategy=${config.strategy.strategy}, bins_above=0, SOL only.`;
+      ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: default ${activeStrategy.range?.bins_above ?? defaultBinsAbove} (allowed 0–${maxBinsAbove}) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
+      : `No active strategy — use strategy=${config.strategy.strategy}, bins_above default ${defaultBinsAbove} (allowed 0–${maxBinsAbove}), amount_y = deploy SOL.`;
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
     const topCandidates = await getTopCandidates({ limit: 10 }).catch((e) => ({ _error: e.message }));
@@ -614,7 +616,8 @@ STEPS:
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    strategy = ${config.strategy.strategy} (always use this, never change it).
    bins_below = round(${config.strategy.minBinsBelow} + (volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
-   bins_above = 0. Single-side SOL only: set amount_y, keep amount_x = 0.
+   bins_above = ${defaultBinsAbove} by default (allowed 0–${maxBinsAbove}). Raise bins_above for post-dump consolidating tokens that may bounce. Keep at 0 for tokens in active uptrend.
+   amount_y = deploy SOL. Set amount_x > 0 ONLY if bins_above > 0 and you want base-token exposure.
 3. Report in this exact format (no tables, no extra sections):
    🚀 DEPLOYED
 
@@ -836,6 +839,11 @@ function formatCandidates(candidates) {
 function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
+    // Diff between reported vs derived PnL exceeds threshold — don't trust either value
+    if (position.pnl_pct_suspicious) {
+      log("cron_warn", `PnL unverified for ${position.pair}: reported=${position.pnl_pct}% derived=${position.pnl_pct_derived}% diff=${position.pnl_pct_diff}% — skipping PnL rules`);
+      return true;
+    }
     if (position.pnl_pct == null) return false;
     if (position.pnl_pct > -90) return false;
     if (tracked?.amount_sol && (position.total_value_usd ?? 0) > 0.01) {
@@ -1389,7 +1397,7 @@ async function deployLatestCandidate(index) {
     amount_y: deployAmount,
     strategy: config.strategy.strategy,
     bins_below: binsBelow,
-    bins_above: 0,
+    bins_above: config.strategy.defaultBinsAbove ?? 0,
     pool_name: candidate.name,
     base_mint: candidate.base?.mint || candidate.base_mint || null,
     bin_step: candidate.bin_step,

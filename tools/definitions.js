@@ -135,8 +135,8 @@ PRIORITY ORDER for strategy and bins:
 HARD RULES:
 - Never use 'curve'.
 - Bin Step: Only deploy in pools with bin_step between 80 and 125.
-- For single-side SOL deploys (amount_y only, amount_x=0), do not request upside exposure:
-  use bins_below only, keep bins_above=0, and the upper bin will be pinned to the current active bin.
+- For pure single-side SOL deploys, keep bins_above=0 and the upper bin will be pinned to the current active bin.
+- If you want upside buffer (post-dump consolidation, ranging tokens), raise bins_above up to the configured maximum. When bins_above > 0, you may set a small amount_x to seed the upper range with base token.
 
 Guidelines (only when user hasn't specified):
 - Strategy: use the active strategy's lp_strategy field (bid_ask or spot)
@@ -174,7 +174,7 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           bins_above: {
             type: "number",
-            description: "Number of bins above the current active bin. Keep this at 0 for single-side SOL deploys. Only use this for dual-sided or explicit upside-exposure deploys."
+            description: "Number of bins above the current active bin. Default is configured (see strategy block). 0 = pure single-side SOL deploy (no upside coverage, pumping will OOR immediately). Raise for post-dump consolidation or ranging tokens that may bounce. Capped at maxBinsAbove."
           },
           downside_pct: {
             type: "number",

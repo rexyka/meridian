@@ -532,6 +532,16 @@ async function runSafetyChecks(name, args) {
         };
       }
 
+      // Cap bins_above at configured maximum to prevent absurd upside exposure
+      const maxBinsAbove = config.strategy.maxBinsAbove ?? 20;
+      const requestedBinsAbove = Number(args.bins_above ?? 0);
+      if (requestedBinsAbove < 0 || requestedBinsAbove > maxBinsAbove) {
+        return {
+          pass: false,
+          reason: `bins_above ${requestedBinsAbove} outside allowed range [0–${maxBinsAbove}]. Adjust maxBinsAbove in config if you need more upside coverage.`,
+        };
+      }
+
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
       const positions = await getMyPositions({ force: true });
       if (positions.total_positions >= config.risk.maxPositions) {

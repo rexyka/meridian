@@ -33,7 +33,9 @@ function load() {
 }
 
 function save(data) {
-  fs.writeFileSync(POOL_MEMORY_FILE, JSON.stringify(data, null, 2));
+  const tmp = `${POOL_MEMORY_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, POOL_MEMORY_FILE);
 }
 
 function isOorCloseReason(reason) {
@@ -137,7 +139,10 @@ export function recordPoolDeploy(poolAddress, deployData) {
   };
 
   entry.deploys.push(deploy);
-  entry.total_deploys = entry.deploys.length;
+  if (entry.deploys.length > 200) {
+    entry.deploys = entry.deploys.slice(-200);
+  }
+  entry.total_deploys = (entry.total_deploys ?? 0) + 1;
   entry.last_deployed_at = deploy.closed_at;
   entry.last_outcome = (deploy.pnl_pct ?? 0) >= 0 ? "profit" : "loss";
 

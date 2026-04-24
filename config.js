@@ -169,6 +169,7 @@ export const config = {
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
     gasReserve:            u.gasReserve            ?? 0.2,
     positionSizePct:       u.positionSizePct       ?? 0.35,
+    deploySlippageBps:     u.deploySlippageBps     ?? 500,   // 5% default
     // Trailing take-profit
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
@@ -180,9 +181,11 @@ export const config = {
 
   // ─── Strategy Mapping ───────────────────
   strategy: {
-    strategy:     u.strategy     ?? "bid_ask",
-    minBinsBelow: u.minBinsBelow ?? 35,
-    maxBinsBelow: u.maxBinsBelow ?? 69,
+    strategy:         u.strategy         ?? "bid_ask",
+    minBinsBelow:     u.minBinsBelow     ?? 35,
+    maxBinsBelow:     u.maxBinsBelow     ?? 69,
+    defaultBinsAbove: u.defaultBinsAbove ?? 0,   // upside bin coverage; 0 keeps legacy SOL-only behavior
+    maxBinsAbove:     u.maxBinsAbove     ?? 20,  // hard cap so LLM can't deploy absurd upside
   },
 
   // ─── Scheduling ─────────────────────────

@@ -108,10 +108,6 @@ function shouldUseLpAgentRelay() {
   return !!config.api.lpAgentRelayEnabled;
 }
 
-function shouldUseLpAgentRelayForDeploy() {
-  return false;
-}
-
 async function meridianJson(pathname, options = {}) {
   const { retry, ...fetchOptions } = options;
   if (!retry) {
@@ -563,137 +559,6 @@ export async function deployPosition({
     totalXLamports = new BN(Math.floor(finalAmountX * Math.pow(10, decimals)));
   }
 
-  if (shouldUseLpAgentRelayForDeploy()) {
-    try {
-      const wallet = getWallet();
-      log(
-        "deploy",
-        `Relay deploy via Agent Meridian: ${pool_address} activeBin ${activeBin.binId} bins ${minBinId}->${maxBinId} amountY=${finalAmountY}`,
-      );
-      const order = await meridianJson("/execution/zap-in/order", {
-        method: "POST",
-        headers: getMeridianHeaders(),
-        body: JSON.stringify({
-          agentId: config.hiveMind.agentId || "agent-local",
-          idempotencyKey: `deploy:${pool_address}:${minBinId}:${maxBinId}:${finalAmountY}:${finalAmountX}`,
-          poolId: pool_address,
-          owner: wallet.publicKey.toString(),
-          strategy: activeStrategy === "spot" ? "Spot" : "BidAsk",
-          inputSOL: finalAmountY,
-          amountY: finalAmountY,
-          amountX: finalAmountX,
-          percentX: finalAmountX > 0 && finalAmountY > 0 ? 0.5 : 0,
-          fromBinId: minBinId,
-          toBinId: maxBinId,
-          slippageBps: 500,
-          provider: "JUPITER_ULTRA",
-        }),
-      });
-
-      const addLiquidityUnsigned = order?.order?.transactions?.addLiquidity || [];
-      const swapUnsigned = order?.order?.transactions?.swap || [];
-      if (addLiquidityUnsigned.length + swapUnsigned.length === 0) {
-        throw new Error("LPAgent order returned no transactions. Check the pool address, deploy amount, and selected range.");
-      }
-      assertNoInitializeBinArrayInstructions(addLiquidityUnsigned);
-
-      const addLiquidity = signSerializedTransactions(addLiquidityUnsigned, wallet);
-      const swap = signSerializedTransactions(swapUnsigned, wallet);
-      const submit = await meridianJson("/execution/zap-in/submit", {
-        method: "POST",
-        headers: getMeridianHeaders(),
-        body: JSON.stringify({
-          requestId: order.requestId,
-          lastValidBlockHeight: order?.order?.lastValidBlockHeight,
-          transactions: {
-            addLiquidity,
-            swap,
-          },
-          meta: {
-            pool: pool_address,
-            strategy: activeStrategy,
-          },
-        }),
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-      _positionsCacheAt = 0;
-      const refreshed = await getMyPositions({ force: true, silent: true }).catch(() => null);
-      const matching = refreshed?.positions?.find(
-        (position) => position.pool === pool_address && position.lower_bin === minBinId && position.upper_bin === maxBinId,
-      ) || refreshed?.positions?.find((position) => position.pool === pool_address);
-
-      const positionAddress = matching?.position || null;
-      if (positionAddress) {
-        trackPosition({
-          position: positionAddress,
-          pool: pool_address,
-          pool_name,
-          strategy: activeStrategy,
-          bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
-          bin_step,
-          volatility,
-          fee_tvl_ratio,
-          organic_score,
-          amount_sol: finalAmountY,
-          amount_x: finalAmountX,
-          active_bin: activeBin.binId,
-          initial_value_usd,
-        });
-      }
-
-      appendDecision({
-        type: "deploy",
-        actor: "SCREENER",
-        pool: pool_address,
-        pool_name,
-        position: positionAddress,
-        summary: `Relay deployed ${finalAmountY} SOL with ${activeStrategy}`,
-        reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
-        risks: [
-          volatility != null ? `volatility ${volatility}` : null,
-          fee_tvl_ratio != null ? `fee/TVL ${fee_tvl_ratio}%` : null,
-        ].filter(Boolean),
-        metrics: {
-          amount_sol: finalAmountY,
-          strategy: activeStrategy,
-          active_bin: activeBin.binId,
-          min_bin: minBinId,
-          max_bin: maxBinId,
-          downside_pct: downside_pct ?? downsideCoveragePct,
-          upside_pct: upside_pct ?? upsideCoveragePct,
-        },
-      });
-
-      return {
-        success: true,
-        relay: true,
-        request_id: order.requestId,
-        position: positionAddress,
-        pool: pool_address,
-        pool_name,
-        bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
-        price_range: { min: minPrice, max: maxPrice },
-        range_coverage: {
-          downside_pct: downsideCoveragePct,
-          upside_pct: upsideCoveragePct,
-          width_pct: totalWidthPct,
-          active_price: activePrice,
-        },
-        bin_step: actualBinStep,
-        base_fee: actualBaseFee,
-        strategy: activeStrategy,
-        wide_range: isWideRange,
-        amount_x: finalAmountX,
-        amount_y: finalAmountY,
-        txs: normalizeExecutionSignatures(submit),
-      };
-    } catch (error) {
-      log("deploy_error", `Relay deploy failed: ${error.message}`);
-      return { success: false, error: error.message };
-    }
-  }
-
   const wallet = getWallet();
   const newPosition = Keypair.generate();
 
@@ -734,7 +599,7 @@ export async function deployPosition({
         totalXAmount: totalXLamports,
         totalYAmount: totalYLamports,
         strategy: { minBinId, maxBinId, strategyType },
-        slippage: 10, // 10%
+        slippage: (config.management.deploySlippageBps ?? 500) / 100, // SDK expects percent
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
       for (let i = 0; i < addTxArray.length; i++) {
@@ -750,7 +615,7 @@ export async function deployPosition({
         totalXAmount: totalXLamports,
         totalYAmount: totalYLamports,
         strategy: { maxBinId, minBinId, strategyType },
-        slippage: 1000, // 10% in bps
+        slippage: config.management.deploySlippageBps ?? 500, // SDK expects bps
       });
       const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, newPosition]);
       txHashes.push(txHash);
