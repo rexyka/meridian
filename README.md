@@ -2,6 +2,8 @@
 
 **Autonomous Meteora DLMM liquidity management agent for Solana, powered by LLMs.**
 
+**Links:** [Website](https://agentmeridian.xyz) | [Telegram](https://t.me/agentmeridian) | [X](https://x.com/meridian_agent)
+
 ---
 
 ## What it does
@@ -25,6 +27,12 @@ Meridian runs a **ReAct agent loop** — each cycle the LLM reasons over live da
 | **Healer Alpha** | Every 10 min | Position management — evaluates each open position and acts |
 
 A third **health check** runs hourly to summarize portfolio state.
+
+### Agent harness
+
+Meridian's agent harness is the runtime wrapper around every autonomous cycle. It gives both **main** and **experimental** agents the same control loop: load live state, inject relevant memory, expose only role-appropriate tools, execute tool calls, and return a readable cycle report.
+
+The harness also keeps a structured decision log in `decision-log.json` for deployments, closes, skips, and no-deploy outcomes. Each entry records the actor, pool or position, summary, reason, key risks, metrics, and rejected alternatives. Recent decisions are injected back into the system prompt and are available through `get_recent_decisions`, so the agent can answer "why did you deploy?", "why did you close?", or "why did you skip?" without guessing after the fact.
 
 **Data sources used by the agents:**
 - `@meteora-ag/dlmm` SDK — on-chain position data, active bin, deploy/close transactions
@@ -72,6 +80,16 @@ DRY_RUN=true                           # set false for live trading
 ```
 
 > **RPC**: defaults to `https://pump.helius-rpc.com` (no key needed). Override with `RPC_URL=` in `.env`.
+
+Optional encrypted `.env` flow:
+
+```bash
+cp .env .env.raw
+printf "replace-with-a-long-local-key\n" > .envrypt
+npm run env:encrypt
+```
+
+Meridian loads envrypt-style encrypted values automatically. Keep `.env.raw` and `.envrypt` local; both are gitignored.
 
 **4. Copy the example config**
 
@@ -196,53 +214,45 @@ Use `/thresholds` to see current values alongside performance stats.
 
 ---
 
-## Hive Mind (optional)
+## HiveMind
 
-Meridian includes an **opt-in** collective intelligence system called **Hive Mind**. When enabled, your agent anonymously shares what it learns (lessons, deploy outcomes, screening thresholds) with other meridian agents and receives crowd wisdom in return.
+Meridian includes a collective intelligence layer called **HiveMind**. By default it uses Agent Meridian at `https://api.agentmeridian.xyz` with the built-in public key, so agents can register, pull shared lessons/presets, and push learning events without a separate registration flow.
 
 **What you get:**
-- Pool consensus from other agents — "8 agents deployed here, 72% win rate"
-- Strategy rankings — which strategies actually work across all agents
-- Pattern consensus — what works at different volatility levels
-- Threshold medians — what screening settings other agents have evolved to
+- Shared lessons from other Meridian agents
+- Strategy presets and crowd performance context
+- Role-aware lessons injected into future screener/manager prompts when `hiveMindPullMode` is `auto`
 
 **What you share:**
 - Lessons from `lessons.json`
-- Deploy outcomes from `pool-memory.json` (pool address, strategy, PnL, hold time)
-- Screening thresholds from `user-config.json`
-- **NO wallet addresses, private keys, or SOL balances are ever sent**
+- Closed-position performance events: pool, pool name, base mint, strategy, close reason, PnL, fees, and hold time
+- Agent heartbeat metadata: agent ID, version, timestamp, and basic capability flags
+- **Private keys and wallet balances are never sent**
 
-**Impact:** 1 non-blocking API call per screening cycle (~200ms), 1 fire-and-forget POST on position close. If the hive is down, your agent doesn't notice.
+HiveMind failures are non-blocking. If Agent Meridian is unavailable, the agent logs a warning and keeps running.
 
 ### Setup
 
-**1. Get the registration token** from the private Telegram discussion.
+No manual HiveMind registration command is required for the shared Agent Meridian setup. `agentId` is generated automatically on startup if it is missing.
 
-**2. Register your agent**
+To use a private HiveMind API key, check the Telegram announcement channel and set it as `hiveMindApiKey`.
 
-```bash
-node -e "import('./hive-mind.js').then(m => m.register('https://meridian-hive-api-production.up.railway.app', 'YOUR_TOKEN'))"
-```
+Relevant config fields:
 
-Replace `YOUR_TOKEN` with the registration token from Telegram.
-
-This automatically saves your credentials to `user-config.json`. **Save the API key printed in the terminal** — it will not be shown again.
-
-**3. Done.** No restart needed. Your agent will sync on every position close and query the hive during screening.
-
-### Disable
-
-Clear both fields in `user-config.json`:
 ```json
 {
+  "agentId": "",
   "hiveMindUrl": "",
-  "hiveMindApiKey": ""
+  "hiveMindApiKey": "",
+  "hiveMindPullMode": "auto"
 }
 ```
 
-### Self-hosting
+Blank `hiveMindUrl` and `hiveMindApiKey` values intentionally fall back to the Agent Meridian defaults. Set `hiveMindPullMode` to `manual` if you do not want shared lessons and presets pulled automatically.
 
-You can run your own hive server instead of using the public one. See [meridian-hive](https://github.com/fciaf420/meridian-hive) for the server source code.
+### Disable
+
+There is currently no empty-string disable path for HiveMind; blank values fall back to the built-in Agent Meridian defaults. A true off switch should be implemented as an explicit config flag before documenting HiveMind as disabled by clearing fields.
 
 ---
 

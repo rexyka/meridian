@@ -9,7 +9,7 @@
  * - make first-time onboarding easy while still supporting advanced tuning
  */
 
-import "dotenv/config";
+import "./envcrypt.js";
 import readline from "readline";
 import fs from "fs";
 import path from "path";
