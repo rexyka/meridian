@@ -346,6 +346,7 @@ const toolMap = {
       solMode: ["management", "solMode"],
       minSolToOpen: ["management", "minSolToOpen"],
       deployAmountSol: ["management", "deployAmountSol"],
+      deploySlippageBps: ["management", "deploySlippageBps"],
       gasReserve: ["management", "gasReserve"],
       positionSizePct: ["management", "positionSizePct"],
       minAgeBeforeYieldCheck: ["management", "minAgeBeforeYieldCheck"],
