@@ -184,14 +184,6 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  const volatility = poolDetailVolatility(detail);
-  if (volatility == null || !Number.isFinite(volatility) || volatility <= 0) {
-    return {
-      pass: false,
-      reason: `Pool volatility ${volatility ?? "unknown"} is unusable — cannot compute safe bin range.`,
-    };
-  }
-
   return { pass: true };
 }
 
