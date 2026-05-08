@@ -9,6 +9,17 @@ import { discoverGmgnPools } from "./gmgn.js";
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
+const MIN_VOLATILITY_TIMEFRAME = "30m";
+const TIMEFRAME_MINUTES = {
+  "5m": 5,
+  "15m": 15,
+  "30m": 30,
+  "1h": 60,
+  "2h": 120,
+  "4h": 240,
+  "12h": 720,
+  "24h": 1440,
+};
 const PVP_SHORTLIST_LIMIT = 2;
 const PVP_RIVAL_LIMIT = 2;
 const PVP_MIN_ACTIVE_TVL = 5_000;
@@ -36,14 +47,21 @@ function numeric(value) {
 }
 
 function isUsableVolatility(value) {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0;
+  const n = numeric(value);
+  return n != null && n > 0;
 }
 
 function includesCaseInsensitive(values, value) {
   if (!Array.isArray(values) || values.length === 0 || !value) return false;
   const needle = String(value).toLowerCase();
   return values.some((entry) => String(entry).toLowerCase() === needle);
+}
+
+function getVolatilityTimeframe(sourceTimeframe) {
+  const source = String(sourceTimeframe || "").trim();
+  const sourceMinutes = TIMEFRAME_MINUTES[source];
+  const minMinutes = TIMEFRAME_MINUTES[MIN_VOLATILITY_TIMEFRAME];
+  return sourceMinutes != null && sourceMinutes >= minMinutes ? source : MIN_VOLATILITY_TIMEFRAME;
 }
 
 function getRawPoolScreeningRejectReason(pool, s) {
@@ -77,6 +95,7 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (s.maxTvl != null && tvl > s.maxTvl) return `TVL ${tvl} above maxTvl ${s.maxTvl}`;
   if (binStep == null || binStep < s.minBinStep) return `bin_step ${binStep ?? "unknown"} below minBinStep ${s.minBinStep}`;
   if (binStep > s.maxBinStep) return `bin_step ${binStep} above maxBinStep ${s.maxBinStep}`;
+  if (!isUsableVolatility(volatility)) return `volatility ${volatility ?? "unknown"} unusable`;
   if (feeActiveTvlRatio == null || feeActiveTvlRatio < s.minFeeActiveTvlRatio) {
     return `fee/active-TVL ${feeActiveTvlRatio ?? "unknown"} below minFeeActiveTvlRatio ${s.minFeeActiveTvlRatio}`;
   }
@@ -89,7 +108,12 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (quoteOrganic == null || quoteOrganic < s.minQuoteOrganic) {
     return `quote organic ${quoteOrganic ?? "unknown"} below minQuoteOrganic ${s.minQuoteOrganic}`;
   }
-  if (Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0 && !includesCaseInsensitive(s.allowedLaunchpads, launchpad)) {
+  if (
+    pool?.discord_signal &&
+    Array.isArray(s.allowedLaunchpads) &&
+    s.allowedLaunchpads.length > 0 &&
+    !includesCaseInsensitive(s.allowedLaunchpads, launchpad)
+  ) {
     return `launchpad ${launchpad || "unknown"} not in allow-list`;
   }
   if (includesCaseInsensitive(s.blockedLaunchpads, launchpad)) {
@@ -113,6 +137,72 @@ async function fetchDiscordSignalCandidates() {
   if (!res.ok) throw new Error(`discord signal candidates ${res.status}`);
   const data = await res.json();
   return Array.isArray(data?.candidates) ? data.candidates : [];
+}
+
+async function fetchPoolDiscoveryPage({ page_size, filters, timeframe, category }) {
+  const url = `${POOL_DISCOVERY_BASE}/pools?` +
+    `page_size=${page_size}` +
+    `&filter_by=${encodeURIComponent(filters)}` +
+    `&timeframe=${timeframe}` +
+    `&category=${category}`;
+
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    throw new Error(`Pool Discovery API error: ${res.status} ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+async function fetchPoolDiscoveryDetail({ poolAddress, timeframe }) {
+  const url = `${POOL_DISCOVERY_BASE}/pools?` +
+    `page_size=1` +
+    `&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}` +
+    `&timeframe=${timeframe}`;
+
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    throw new Error(`Pool detail API error: ${res.status} ${res.statusText}`);
+  }
+
+  const data = await res.json();
+  return (data.data || [])[0] ?? null;
+}
+
+async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
+  if (!Array.isArray(rawPools) || rawPools.length === 0) return rawPools;
+  const volatilityTimeframe = getVolatilityTimeframe(sourceTimeframe);
+  if (sourceTimeframe === volatilityTimeframe) {
+    for (const pool of rawPools) {
+      if (pool) pool.volatility_timeframe = volatilityTimeframe;
+    }
+    return rawPools;
+  }
+
+  const uniquePoolAddresses = [...new Set(rawPools.map((pool) => pool?.pool_address).filter(Boolean))];
+  const volatilityResults = await Promise.allSettled(
+    uniquePoolAddresses.map((poolAddress) =>
+      fetchPoolDiscoveryDetail({ poolAddress, timeframe: volatilityTimeframe })
+        .then((pool) => ({ poolAddress, volatility: numeric(pool?.volatility) }))
+    )
+  );
+
+  const volatilityByPool = new Map();
+  for (const result of volatilityResults) {
+    if (result.status !== "fulfilled") continue;
+    if (result.value.volatility == null) continue;
+    volatilityByPool.set(result.value.poolAddress, result.value.volatility);
+  }
+
+  for (const pool of rawPools) {
+    if (!pool?.pool_address || !volatilityByPool.has(pool.pool_address)) continue;
+    pool.volatility = volatilityByPool.get(pool.pool_address);
+    pool.volatility_timeframe = volatilityTimeframe;
+  }
+
+  return rawPools;
 }
 
 async function searchAssetsBySymbol(symbol) {
@@ -213,30 +303,12 @@ export async function discoverPools({
       : null,
   ].filter(Boolean).join("&&");
 
-  const useServerDiscovery = !!config.api.publicApiKey;
-  const url = useServerDiscovery
-    ? `${config.api.url}/discovery/pools?` +
-      `page_size=${page_size}` +
-      `&filter_by=${encodeURIComponent(filters)}` +
-      `&timeframe=${s.timeframe}` +
-      `&category=${s.category}`
-    : `${POOL_DISCOVERY_BASE}/pools?` +
-      `page_size=${page_size}` +
-      `&filter_by=${encodeURIComponent(filters)}` +
-      `&timeframe=${s.timeframe}` +
-      `&category=${s.category}`;
-
-  const res = await fetch(url, {
-    headers: useServerDiscovery && config.api.publicApiKey
-      ? { "x-api-key": config.api.publicApiKey }
-      : {},
+  const data = await fetchPoolDiscoveryPage({
+    page_size,
+    filters,
+    timeframe: s.timeframe,
+    category: s.category,
   });
-
-  if (!res.ok) {
-    throw new Error(`Pool Discovery API error: ${res.status} ${res.statusText}`);
-  }
-
-  const data = await res.json();
 
   let rawPools = Array.isArray(data.data) ? data.data : [];
 
@@ -281,6 +353,8 @@ export async function discoverPools({
       rawPools = Array.from(byPool.values());
     }
   }
+
+  rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
 
   const filteredExamples = [];
   const thresholdedRawPools = rawPools.filter((pool) => {
@@ -412,7 +486,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         return false;
       }
       if (!isUsableVolatility(p.volatility)) {
-        pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "unknown"} is unusable`);
+        pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "unknown"} unusable`);
         return false;
       }
       if (occupiedPools.has(p.pool)) {
@@ -605,26 +679,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
  * Returns the full unfiltered API object (all fields, not condensed).
  */
 export async function getPoolDetail({ pool_address, timeframe = "5m" }) {
-  const useServerDiscovery = !!config.api.publicApiKey;
-  const url = useServerDiscovery
-    ? `${config.api.url}/discovery/pools/${pool_address}?timeframe=${encodeURIComponent(timeframe)}`
-    : `${POOL_DISCOVERY_BASE}/pools?` +
-      `page_size=1` +
-      `&filter_by=${encodeURIComponent(`pool_address=${pool_address}`)}` +
-      `&timeframe=${timeframe}`;
-
-  const res = await fetch(url, {
-    headers: useServerDiscovery && config.api.publicApiKey
-      ? { "x-api-key": config.api.publicApiKey }
-      : {},
-  });
-
-  if (!res.ok) {
-    throw new Error(`Pool detail API error: ${res.status} ${res.statusText}`);
-  }
-
-  const data = await res.json();
-  const pool = useServerDiscovery ? data : (data.data || [])[0];
+  const pool = await fetchPoolDiscoveryDetail({ poolAddress: pool_address, timeframe });
 
   if (!pool) {
     throw new Error(`Pool ${pool_address} not found`);
@@ -661,7 +716,8 @@ function condensePool(p) {
     fee_window: round(p.fee),
     volume_window: round(p.volume),
     fee_active_tvl_ratio: p.fee_active_tvl_ratio != null ? fix(p.fee_active_tvl_ratio, 4) : null,
-    volatility: fix(p.volatility, 2),
+    volatility: fix(p.volatility, 4),
+    volatility_timeframe: p.volatility_timeframe || getVolatilityTimeframe(config.screening.timeframe),
 
 
     // Token health
@@ -702,7 +758,8 @@ function round(n) {
 }
 
 function fix(n, decimals) {
-  return n != null ? Number(n.toFixed(decimals)) : null;
+  const value = numeric(n);
+  return value != null ? Number(value.toFixed(decimals)) : null;
 }
 
 function pushFilteredReason(list, pool, reason) {

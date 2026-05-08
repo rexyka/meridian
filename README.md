@@ -119,7 +119,7 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `dryRun` | `true` | Simulate all transactions without submitting |
 | `deployAmountSol` | `0.5` | SOL to deploy per new position |
 | `maxPositions` | `3` | Maximum concurrent open positions |
-| `minSolToOpen` | `0.07` | Minimum wallet SOL balance before opening a new position |
+| `minSolToOpen` | `0.55` | Minimum wallet SOL balance before opening a new position |
 | `managementIntervalMin` | `10` | How often the management agent runs (minutes) |
 | `screeningIntervalMin` | `30` | How often the screening agent runs (minutes) |
 | `managementModel` | `openrouter/healer-alpha` | LLM model for position management |

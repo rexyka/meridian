@@ -20,7 +20,7 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
-import { config, reloadScreeningThresholds } from "../config.js";
+import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import path from "path";
@@ -31,6 +31,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "../user-config.json");
 const GMGN_CONFIG_PATH = path.join(__dirname, "../gmgn-config.json");
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
+const MIN_VOLATILITY_TIMEFRAME = "30m";
+const TIMEFRAME_MINUTES = {
+  "5m": 5,
+  "15m": 15,
+  "30m": 30,
+  "1h": 60,
+  "2h": 120,
+  "4h": 240,
+  "12h": 720,
+  "24h": 1440,
+};
 import { log, logAction } from "../logger.js";
 import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
 
@@ -56,6 +67,13 @@ function numberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function getVolatilityTimeframe(sourceTimeframe) {
+  const source = String(sourceTimeframe || "").trim();
+  const sourceMinutes = TIMEFRAME_MINUTES[source];
+  const minMinutes = TIMEFRAME_MINUTES[MIN_VOLATILITY_TIMEFRAME];
+  return sourceMinutes != null && sourceMinutes >= minMinutes ? source : MIN_VOLATILITY_TIMEFRAME;
+}
+
 function poolDetailTvl(pool) {
   return numberOrNull(pool?.tvl ?? pool?.active_tvl ?? pool?.liquidity);
 }
@@ -72,10 +90,10 @@ function poolDetailVolatility(pool) {
   return numberOrNull(pool?.volatility);
 }
 
-async function fetchFreshPoolDetail(poolAddress) {
-  const timeframe = encodeURIComponent(config.screening.timeframe || "5m");
+async function fetchFreshPoolDetail(poolAddress, timeframe = config.screening.timeframe || "5m") {
+  const encodedTimeframe = encodeURIComponent(timeframe);
   const filter = encodeURIComponent(`pool_address=${poolAddress}`);
-  const url = `${POOL_DISCOVERY_BASE}/pools?page_size=1&filter_by=${filter}&timeframe=${timeframe}`;
+  const url = `${POOL_DISCOVERY_BASE}/pools?page_size=1&filter_by=${filter}&timeframe=${encodedTimeframe}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Pool Discovery API error: ${res.status} ${res.statusText}`);
   const data = await res.json();
@@ -126,6 +144,27 @@ async function validateDeployPoolThresholds(args) {
     return {
       pass: false,
       reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
+    };
+  }
+
+  const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
+  let volatilityDetail = detail;
+  if ((config.screening.timeframe || "5m") !== volatilityTimeframe) {
+    try {
+      volatilityDetail = await fetchFreshPoolDetail(args.pool_address, volatilityTimeframe);
+    } catch (error) {
+      return {
+        pass: false,
+        reason: `Could not verify pool ${volatilityTimeframe} volatility before deploy: ${error.message}`,
+      };
+    }
+  }
+
+  const volatility = poolDetailVolatility(volatilityDetail);
+  if (volatility == null || volatility <= 0) {
+    return {
+      pass: false,
+      reason: `Pool ${volatilityTimeframe} volatility ${volatility ?? "unknown"} is unusable. Refusing deploy.`,
     };
   }
 
@@ -326,8 +365,10 @@ const toolMap = {
       maxSteps: ["llm", "maxSteps"],
       // strategy
       strategy:     ["strategy", "strategy"],
+      binsBelow:    ["strategy", "maxBinsBelow", ["maxBinsBelow"]],
       minBinsBelow: ["strategy", "minBinsBelow"],
       maxBinsBelow: ["strategy", "maxBinsBelow"],
+      defaultBinsBelow: ["strategy", "defaultBinsBelow"],
       // hivemind
       hiveMindUrl: ["hiveMind", "url"],
       hiveMindApiKey: ["hiveMind", "apiKey"],
@@ -375,8 +416,6 @@ const toolMap = {
       gmgnMinKolCount: ["gmgn", "minKolCount"],
       gmgnMinSmartDegenCount: ["gmgn", "minSmartDegenCount"],
       gmgnMinTotalFeeSol: ["gmgn", "minTotalFeeSol"],
-      gmgnRejectSingleVolumeSpike: ["gmgn", "rejectSingleVolumeSpike"],
-      gmgnMaxSingleCandleVolumeShare: ["gmgn", "maxSingleCandleVolumeShare"],
       gmgnIndicatorFilter: ["gmgn", "indicatorFilter"],
       gmgnIndicatorInterval: ["gmgn", "indicatorInterval"],
       gmgnRequireBullishSt: ["gmgn", "indicatorRules", "requireBullishSupertrend"],
@@ -404,11 +443,21 @@ const toolMap = {
     const CONFIG_MAP_LOWER = Object.fromEntries(
       Object.entries(CONFIG_MAP).map(([k, v]) => [k.toLowerCase(), [k, v]])
     );
+    const STRATEGY_BIN_KEYS = new Set(["binsBelow", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow"]);
 
     for (const [key, val] of Object.entries(changes)) {
       const match = CONFIG_MAP[key] ? [key, CONFIG_MAP[key]] : CONFIG_MAP_LOWER[key.toLowerCase()];
       if (!match) { unknown.push(key); continue; }
-      applied[match[0]] = val;
+      let normalizedVal = val;
+      if (STRATEGY_BIN_KEYS.has(match[0])) {
+        const numericVal = Number(val);
+        if (!Number.isFinite(numericVal)) {
+          unknown.push(key);
+          continue;
+        }
+        normalizedVal = Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal));
+      }
+      applied[match[0]] = normalizedVal;
     }
 
     if (Object.keys(applied).length === 0) {
@@ -430,6 +479,22 @@ const toolMap = {
         config[section][field] = val;
         log("config", `update_config: config.${section}.${field} ${redactConfigValue(key, before)} → ${redactConfigValue(key, val)} (verify: ${redactConfigValue(key, config[section][field])})`);
       }
+    }
+    if (
+      applied.binsBelow != null ||
+      applied.minBinsBelow != null ||
+      applied.maxBinsBelow != null ||
+      applied.defaultBinsBelow != null
+    ) {
+      config.strategy.minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW)));
+      config.strategy.maxBinsBelow = Math.max(config.strategy.minBinsBelow, Math.round(Number(config.strategy.maxBinsBelow ?? config.strategy.minBinsBelow)));
+      config.strategy.defaultBinsBelow = Math.max(
+        config.strategy.minBinsBelow,
+        Math.min(
+          config.strategy.maxBinsBelow,
+          Math.round(Number(config.strategy.defaultBinsBelow ?? config.strategy.maxBinsBelow)),
+        ),
+      );
     }
 
     // Persist GMGN tuning to gmgn-config.json, and everything else to user-config.json.
@@ -641,13 +706,62 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      // Cap bins_above at configured maximum to prevent absurd upside exposure
-      const maxBinsAbove = config.strategy.maxBinsAbove ?? 20;
-      const requestedBinsAbove = Number(args.bins_above ?? 0);
-      if (requestedBinsAbove < 0 || requestedBinsAbove > maxBinsAbove) {
+      const deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
+      const deployAmountX = Number(args.amount_x ?? 0);
+      if (Number.isFinite(deployAmountX) && deployAmountX > 0) {
         return {
           pass: false,
-          reason: `bins_above ${requestedBinsAbove} outside allowed range [0–${maxBinsAbove}]. Adjust maxBinsAbove in config if you need more upside coverage.`,
+          reason: "This agent only supports single-side SOL deploys. Use amount_y/amount_sol and keep amount_x=0.",
+        };
+      }
+      const requestedBinsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow);
+      const requestedBinsAbove = Number(args.bins_above ?? 0);
+      const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
+      const isSingleSidedSol = deployAmountY > 0 && deployAmountX <= 0;
+      const requestedTotalBins = requestedBinsBelow + requestedBinsAbove;
+      const requestedVolatility = args.volatility == null ? null : Number(args.volatility);
+      if (args.volatility != null && (!Number.isFinite(requestedVolatility) || requestedVolatility <= 0)) {
+        return {
+          pass: false,
+          reason: `volatility ${args.volatility} is invalid. Refusing deploy because the volatility feed is unusable.`,
+        };
+      }
+      if (
+        args.downside_pct == null &&
+        args.upside_pct == null &&
+        (
+          !Number.isFinite(requestedBinsBelow) ||
+          !Number.isFinite(requestedBinsAbove) ||
+          !Number.isInteger(requestedBinsBelow) ||
+          !Number.isInteger(requestedBinsAbove) ||
+          requestedBinsBelow < 0 ||
+          requestedBinsAbove < 0 ||
+          requestedTotalBins < minBinsBelow
+        )
+      ) {
+        return {
+          pass: false,
+          reason: `deploy range ${requestedTotalBins} total bins is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
+        };
+      }
+      if (
+        isSingleSidedSol &&
+        args.downside_pct == null &&
+        (!Number.isFinite(requestedBinsBelow) || !Number.isInteger(requestedBinsBelow) || requestedBinsBelow < minBinsBelow)
+      ) {
+        return {
+          pass: false,
+          reason: `bins_below ${args.bins_below ?? "missing"} is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
+        };
+      }
+      if (
+        isSingleSidedSol &&
+        args.upside_pct == null &&
+        (!Number.isFinite(requestedBinsAbove) || !Number.isInteger(requestedBinsAbove) || requestedBinsAbove !== 0)
+      ) {
+        return {
+          pass: false,
+          reason: "Single-side SOL deploy must use bins_above=0.",
         };
       }
 

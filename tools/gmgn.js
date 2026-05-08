@@ -668,6 +668,7 @@ export function formatGmgnCandidateForPrompt(p) {
   const tvl = p.tvl != null ? `tvl=$${(p.tvl / 1000).toFixed(1)}k` : p.active_tvl != null ? `tvl=$${(p.active_tvl / 1000).toFixed(1)}k` : "";
   const feeTvl = p.fee_active_tvl_ratio != null ? `fee/tvl=${p.fee_active_tvl_ratio}%` : "";
   const vol = p.volume_window != null ? `vol=$${(p.volume_window / 1000).toFixed(1)}k` : "";
+  const volatility = Number.isFinite(Number(p.volatility)) && Number(p.volatility) > 0 ? `volatility=${p.volatility}` : "volatility=unknown";
   const ath = p.price_vs_ath_pct != null ? `price_vs_ath=${p.price_vs_ath_pct.toFixed(0)}%` : "";
 
   const top10 = p.gmgn_token_info_top10_pct != null ? `top10=${p.gmgn_token_info_top10_pct}%` : (p.gmgn_top10_holder_pct != null ? `top10=${p.gmgn_top10_holder_pct}%` : "");
@@ -712,7 +713,7 @@ export function formatGmgnCandidateForPrompt(p) {
   }
 
   const header = [sym, launchpad, age, mcap, binStep].filter(Boolean).join(" | ");
-  const pool = [tvl, feeTvl, vol, ath].filter(Boolean).join(" | ");
+  const pool = [tvl, feeTvl, vol, volatility, ath].filter(Boolean).join(" | ");
   const risk = [top10, dev, bot, fresh, bundler].filter(Boolean).join(" | ");
   const traction = [holders, fees, smart, kol].filter(Boolean).join(" | ");
 

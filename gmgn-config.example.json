@@ -37,8 +37,6 @@
   "dumpKolMinHoldPct": 0.5,
   "klineResolution": "5m",
   "klineLookbackMinutes": 60,
-  "rejectSingleVolumeSpike": true,
-  "maxSingleCandleVolumeShare": 0.7,
   "indicatorFilter": true,
   "indicatorInterval": "5_MINUTE",
   "indicatorRules": {

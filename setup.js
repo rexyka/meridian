@@ -4,7 +4,7 @@
  * Run: npm run setup
  *
  * Goals:
- * - cover the full editable user-config surface
+ * - cover the common editable user-config surface
  * - preserve unrelated existing keys instead of overwriting the whole file
  * - make first-time onboarding easy while still supporting advanced tuning
  */
@@ -251,7 +251,9 @@ const FIELD_SECTIONS = [
         { key: "spot", label: "spot" },
         { key: "curve", label: "curve" },
       ]},
-      { key: "binsBelow", label: "Bins below active price", type: "number", min: 1 },
+      { key: "minBinsBelow", label: "Min bins below active price", type: "number", min: 35 },
+      { key: "maxBinsBelow", label: "Max bins below active price", type: "number", min: 35 },
+      { key: "defaultBinsBelow", label: "Default bins below active price", type: "number", min: 35 },
     ],
   },
   {
@@ -446,7 +448,7 @@ console.log(
 const updates = {
   ...existing,
   preset: presetChoice.key,
-  hiveMindUrl: DEFAULT_HIVEMIND_URL,
+  hiveMindUrl: existing.hiveMindUrl || DEFAULT_HIVEMIND_URL,
 };
 const gmgnUpdates = {
   ...existingGmgn,
@@ -472,7 +474,7 @@ if (!updates.llmApiKey && existing.llmApiKey) updates.llmApiKey = existing.llmAp
 if (!updates.hiveMindApiKey && existing.hiveMindApiKey) updates.hiveMindApiKey = existing.hiveMindApiKey;
 if (!gmgnUpdates.apiKey && existingGmgn.apiKey) gmgnUpdates.apiKey = existingGmgn.apiKey;
 if (existing.agentId && !updates.agentId) updates.agentId = existing.agentId;
-updates.hiveMindUrl = DEFAULT_HIVEMIND_URL;
+updates.hiveMindUrl = updates.hiveMindUrl || existing.hiveMindUrl || DEFAULT_HIVEMIND_URL;
 
 fs.writeFileSync(CONFIG_PATH, JSON.stringify(updates, null, 2));
 fs.writeFileSync(GMGN_CONFIG_PATH, JSON.stringify(gmgnUpdates, null, 2));
