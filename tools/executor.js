@@ -68,6 +68,10 @@ function poolDetailFeeActiveTvlRatio(pool) {
   return numberOrNull(pool?.fee_active_tvl_ratio);
 }
 
+function poolDetailVolatility(pool) {
+  return numberOrNull(pool?.volatility);
+}
+
 async function fetchFreshPoolDetail(poolAddress) {
   const timeframe = encodeURIComponent(config.screening.timeframe || "5m");
   const filter = encodeURIComponent(`pool_address=${poolAddress}`);
@@ -138,6 +142,14 @@ async function validateDeployPoolThresholds(args) {
     return {
       pass: false,
       reason: `Pool bin_step ${actualBinStep} is above configured maxBinStep ${maxStep}.`,
+    };
+  }
+
+  const volatility = poolDetailVolatility(detail);
+  if (volatility == null || !Number.isFinite(volatility) || volatility <= 0) {
+    return {
+      pass: false,
+      reason: `Pool volatility ${volatility ?? "unknown"} is unusable — cannot compute safe bin range.`,
     };
   }
 
