@@ -111,6 +111,10 @@ function shouldUseLpAgentRelay() {
   return !!config.api.lpAgentRelayEnabled;
 }
 
+function shouldUseLpAgentRelayForDeploy() {
+  return false;
+}
+
 async function meridianJson(pathname, options = {}) {
   const { retry, ...fetchOptions } = options;
   if (!retry) {
