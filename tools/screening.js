@@ -42,6 +42,7 @@ function scoreCandidate(pool) {
 }
 
 function numeric(value) {
+  if (value == null) return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -55,6 +56,24 @@ function includesCaseInsensitive(values, value) {
   if (!Array.isArray(values) || values.length === 0 || !value) return false;
   const needle = String(value).toLowerCase();
   return values.some((entry) => String(entry).toLowerCase() === needle);
+}
+
+function getPoolLaunchpad(pool) {
+  const base = pool?.token_x || {};
+  return base?.launchpad ||
+    base?.launchpad_platform ||
+    pool?.base_token_launchpad ||
+    pool?.launchpad ||
+    pool?.launchpad_platform ||
+    null;
+}
+
+function getPoolBaseMint(pool) {
+  return pool?.token_x?.address ||
+    pool?.base_token_address ||
+    pool?.base_mint ||
+    pool?.base?.mint ||
+    null;
 }
 
 function getVolatilityTimeframe(sourceTimeframe) {
@@ -76,7 +95,7 @@ function getRawPoolScreeningRejectReason(pool, s) {
   const mcap = numeric(base?.market_cap);
   const baseOrganic = numeric(base?.organic_score);
   const quoteOrganic = numeric(quote?.organic_score);
-  const launchpad = base?.launchpad || pool?.base_token_launchpad || null;
+  const launchpad = getPoolLaunchpad(pool);
   const createdAt = numeric(base?.created_at);
 
   if (s.excludeHighSupplyConcentration && pool?.base_token_has_high_supply_concentration === true) {
@@ -112,9 +131,10 @@ function getRawPoolScreeningRejectReason(pool, s) {
     pool?.discord_signal &&
     Array.isArray(s.allowedLaunchpads) &&
     s.allowedLaunchpads.length > 0 &&
+    launchpad &&
     !includesCaseInsensitive(s.allowedLaunchpads, launchpad)
   ) {
-    return `launchpad ${launchpad || "unknown"} not in allow-list`;
+    return `launchpad ${launchpad} not in allow-list`;
   }
   if (includesCaseInsensitive(s.blockedLaunchpads, launchpad)) {
     return `blocked launchpad (${launchpad})`;
@@ -174,32 +194,46 @@ async function fetchPoolDiscoveryDetail({ poolAddress, timeframe }) {
 async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
   if (!Array.isArray(rawPools) || rawPools.length === 0) return rawPools;
   const volatilityTimeframe = getVolatilityTimeframe(sourceTimeframe);
-  if (sourceTimeframe === volatilityTimeframe) {
-    for (const pool of rawPools) {
-      if (pool) pool.volatility_timeframe = volatilityTimeframe;
-    }
-    return rawPools;
+
+  // Tag primary-timeframe values on every pool before any overwrite
+  for (const pool of rawPools) {
+    if (!pool) continue;
+    pool[`volume_${sourceTimeframe}`] = pool.volume ?? null;
+    pool[`volatility_${sourceTimeframe}`] = pool.volatility ?? null;
+    pool.volatility_timeframe = volatilityTimeframe;
   }
 
+  if (sourceTimeframe === volatilityTimeframe) return rawPools;
+
   const uniquePoolAddresses = [...new Set(rawPools.map((pool) => pool?.pool_address).filter(Boolean))];
-  const volatilityResults = await Promise.allSettled(
+  const longResults = await Promise.allSettled(
     uniquePoolAddresses.map((poolAddress) =>
       fetchPoolDiscoveryDetail({ poolAddress, timeframe: volatilityTimeframe })
-        .then((pool) => ({ poolAddress, volatility: numeric(pool?.volatility) }))
+        .then((pool) => ({
+          poolAddress,
+          volatility: numeric(pool?.volatility),
+          volume: numeric(pool?.volume),
+        }))
     )
   );
 
-  const volatilityByPool = new Map();
-  for (const result of volatilityResults) {
+  const metricsByPool = new Map();
+  for (const result of longResults) {
     if (result.status !== "fulfilled") continue;
-    if (result.value.volatility == null) continue;
-    volatilityByPool.set(result.value.poolAddress, result.value.volatility);
+    metricsByPool.set(result.value.poolAddress, result.value);
   }
 
   for (const pool of rawPools) {
-    if (!pool?.pool_address || !volatilityByPool.has(pool.pool_address)) continue;
-    pool.volatility = volatilityByPool.get(pool.pool_address);
-    pool.volatility_timeframe = volatilityTimeframe;
+    if (!pool?.pool_address) continue;
+    const metrics = metricsByPool.get(pool.pool_address);
+    if (!metrics) continue;
+
+    pool[`volume_${volatilityTimeframe}`] = metrics.volume;
+    pool[`volatility_${volatilityTimeframe}`] = metrics.volatility;
+
+    // Use longer-timeframe values as the canonical ones for filtering
+    if (metrics.volatility != null) pool.volatility = metrics.volatility;
+    if (metrics.volume != null) pool.volume = metrics.volume;
   }
 
   return rawPools;
@@ -210,6 +244,54 @@ async function searchAssetsBySymbol(symbol) {
   if (!res.ok) throw new Error(`assets/search ${res.status}`);
   const data = await res.json();
   return Array.isArray(data) ? data : [data];
+}
+
+async function enrichDiscordSignalLaunchpads(rawPools) {
+  const missing = rawPools.filter((pool) =>
+    pool?.discord_signal &&
+    !getPoolLaunchpad(pool) &&
+    getPoolBaseMint(pool)
+  );
+  if (missing.length === 0) return;
+
+  const uniqueMints = [...new Set(missing.map(getPoolBaseMint).filter(Boolean))];
+  const results = await Promise.allSettled(
+    uniqueMints.map(async (mint) => {
+      const assets = await searchAssetsBySymbol(mint);
+      const asset = assets.find((item) => item?.id === mint) || assets[0] || null;
+      return { mint, asset };
+    })
+  );
+
+  const byMint = new Map();
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    const launchpad = result.value.asset?.launchpad || result.value.asset?.launchpadPlatform || null;
+    if (!launchpad) continue;
+    byMint.set(result.value.mint, {
+      launchpad,
+      dev: result.value.asset?.dev || null,
+      holderCount: numeric(result.value.asset?.holderCount),
+      organicScore: numeric(result.value.asset?.organicScore),
+      marketCap: numeric(result.value.asset?.mcap ?? result.value.asset?.fdv),
+      createdAt: result.value.asset?.createdAt ? Date.parse(result.value.asset.createdAt) : null,
+    });
+  }
+
+  for (const pool of missing) {
+    const mint = getPoolBaseMint(pool);
+    const asset = byMint.get(mint);
+    if (!asset) continue;
+    pool.token_x ||= {};
+    pool.token_x.launchpad = asset.launchpad;
+    pool.base_token_launchpad = asset.launchpad;
+    if (asset.dev && !pool.token_x.dev) pool.token_x.dev = asset.dev;
+    if (asset.holderCount != null && pool.base_token_holders == null) pool.base_token_holders = asset.holderCount;
+    if (asset.organicScore != null && pool.token_x.organic_score == null) pool.token_x.organic_score = asset.organicScore;
+    if (asset.marketCap != null && pool.token_x.market_cap == null) pool.token_x.market_cap = asset.marketCap;
+    if (asset.createdAt != null && pool.token_x.created_at == null) pool.token_x.created_at = asset.createdAt;
+    log("screening", `Discord signal launchpad enriched from Jupiter: ${pool.name || mint} — ${asset.launchpad}`);
+  }
 }
 
 async function findRivalPool(mint) {
@@ -275,6 +357,33 @@ async function enrichPvpRisk(pools) {
  * Fetch pools from the Meteora Pool Discovery API.
  * Returns condensed data optimized for LLM consumption (saves tokens).
  */
+
+/**
+ * Refresh live metrics for discord-only signal pools.
+ * Their discovery_pool is a snapshot from when the signal was captured — volume/volatility/fee
+ * can be 0 even if the pool is active right now. We overwrite with fresh data from the
+ * pool discovery API so filtering uses current numbers, not stale ones.
+ */
+async function refreshDiscordOnlyPools(pools, timeframe) {
+  if (!pools.length) return;
+  const FIELDS = ["volume", "fee", "active_tvl", "tvl", "volatility", "fee_active_tvl_ratio"];
+  const results = await Promise.allSettled(
+    pools.map((pool) =>
+      fetchPoolDiscoveryDetail({ poolAddress: pool.pool_address, timeframe })
+        .then((fresh) => ({ pool, fresh }))
+    )
+  );
+  for (const result of results) {
+    if (result.status !== "fulfilled" || !result.value.fresh) continue;
+    const { pool, fresh } = result.value;
+    for (const field of FIELDS) {
+      const val = numeric(fresh[field]);
+      if (val != null) pool[field] = val;
+    }
+    log("screening", `Discord signal refreshed live data: ${pool.name || pool.pool_address} — vol=${pool.volume?.toFixed(0)} fee=${pool.fee?.toFixed(2)}`);
+  }
+}
+
 export async function discoverPools({
   page_size = 50,
 } = {}) {
@@ -334,8 +443,11 @@ export async function discoverPools({
 
     if (config.screening.discordSignalMode === "only") {
       rawPools = signalPools;
+      // Refresh all signal pools with live data since discovery_pool is a stale snapshot
+      await refreshDiscordOnlyPools(rawPools, s.timeframe);
     } else if (signalPools.length > 0) {
       const byPool = new Map(rawPools.map((pool) => [pool.pool_address, pool]));
+      const discordOnlyPools = [];
       for (const signalPool of signalPools) {
         if (byPool.has(signalPool.pool_address)) {
           byPool.set(signalPool.pool_address, {
@@ -348,13 +460,20 @@ export async function discoverPools({
           });
         } else {
           byPool.set(signalPool.pool_address, signalPool);
+          discordOnlyPools.push(signalPool);
         }
       }
       rawPools = Array.from(byPool.values());
+      // Refresh discord-only pools with live data — their discovery_pool is a stale snapshot
+      // so volume/volatility/fee may be 0 even when the pool is active right now
+      if (discordOnlyPools.length > 0) {
+        await refreshDiscordOnlyPools(discordOnlyPools, s.timeframe);
+      }
     }
   }
 
   rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
+  await enrichDiscordSignalLaunchpads(rawPools);
 
   const filteredExamples = [];
   const thresholdedRawPools = rawPools.filter((pool) => {
@@ -719,6 +838,14 @@ function condensePool(p) {
     volatility: fix(p.volatility, 4),
     volatility_timeframe: p.volatility_timeframe || getVolatilityTimeframe(config.screening.timeframe),
 
+    // Per-timeframe breakdown (populated when sourceTimeframe !== volatilityTimeframe)
+    ...(p.volatility_timeframe && p.volatility_timeframe !== config.screening.timeframe ? {
+      [`volume_${config.screening.timeframe}`]: round(p[`volume_${config.screening.timeframe}`] ?? null),
+      [`volume_${p.volatility_timeframe}`]: round(p[`volume_${p.volatility_timeframe}`] ?? null),
+      [`volatility_${config.screening.timeframe}`]: fix(p[`volatility_${config.screening.timeframe}`] ?? null, 4),
+      [`volatility_${p.volatility_timeframe}`]: fix(p[`volatility_${p.volatility_timeframe}`] ?? null, 4),
+    } : {}),
+
 
     // Token health
     holders: p.base_token_holders,
@@ -728,6 +855,7 @@ function condensePool(p) {
       ? Math.floor((Date.now() - p.token_x.created_at) / 3_600_000)
       : null,
     dev: p.token_x?.dev || null,
+    launchpad: getPoolLaunchpad(p),
 
     // Position health
     active_positions: p.active_positions,
