@@ -323,21 +323,41 @@ async function fetchTopMeteoraDlmmPoolsForMint(mint, minTvl = 0, limit = 2) {
     .slice(0, limit);
 }
 
-async function fetchPoolDetailDirect(poolAddress) {
+function hasUsableVolatility(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0;
+}
+
+async function fetchPoolDetailDirect(poolAddress, timeframe = "5m") {
   // Always use Meteora's public Pool Discovery API — the server-side endpoint
   // (api.agentmeridian.xyz) returns stale/fee=0 data for some pools.
   const discoveryBase = "https://pool-discovery-api.datapi.meteora.ag";
-  const url = `${discoveryBase}/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=5m`;
+  const url = `${discoveryBase}/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=${encodeURIComponent(timeframe)}`;
   const res = await fetch(url);
   if (!res.ok) return null;
   const data = await res.json();
   return (data?.data || [])[0] ?? null;
 }
 
+async function fetchPoolDetailWithVolatilityFallback(poolAddress) {
+  const detail5m = await fetchPoolDetailDirect(poolAddress, "5m");
+  if (hasUsableVolatility(detail5m?.volatility)) return detail5m;
+
+  const detail30m = await fetchPoolDetailDirect(poolAddress, "30m").catch(() => null);
+  if (!hasUsableVolatility(detail30m?.volatility)) return detail5m ?? detail30m;
+
+  return {
+    ...(detail5m ?? detail30m),
+    volatility: detail30m.volatility,
+    volatility_timeframe: "30m",
+    volatility_5m: detail5m?.volatility ?? null,
+  };
+}
+
 async function pickBestPool(pools) {
   const details = await Promise.all(
     pools.map((pool) =>
-      fetchPoolDetailDirect(pool.address || pool.pool_address).catch(() => null)
+      fetchPoolDetailWithVolatilityFallback(pool.address || pool.pool_address).catch(() => null)
     )
   );
   if (pools.length <= 1) return { pool: pools[0] ?? null, detail: details[0] ?? null };
@@ -396,6 +416,7 @@ function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAn
     active_tvl: round(activeTvl),
     fee_active_tvl_ratio: feeActiveTvlRatio,
     volatility: poolDetail?.volatility != null ? Number(Number(poolDetail.volatility).toFixed(2)) : null,
+    volatility_timeframe: poolDetail?.volatility_timeframe || "5m",
     // Stage 1 GMGN rank: token-level metrics
     holders: num(token.holder_count || info.holder_count),
     mcap: round(num(token.market_cap || (num(info.price) * num(info.circulating_supply)))),
@@ -668,7 +689,8 @@ export function formatGmgnCandidateForPrompt(p) {
   const tvl = p.tvl != null ? `tvl=$${(p.tvl / 1000).toFixed(1)}k` : p.active_tvl != null ? `tvl=$${(p.active_tvl / 1000).toFixed(1)}k` : "";
   const feeTvl = p.fee_active_tvl_ratio != null ? `fee/tvl=${p.fee_active_tvl_ratio}%` : "";
   const vol = p.volume_window != null ? `vol=$${(p.volume_window / 1000).toFixed(1)}k` : "";
-  const volatility = Number.isFinite(Number(p.volatility)) && Number(p.volatility) > 0 ? `volatility=${p.volatility}` : "volatility=unknown";
+  const volatilityLabel = p.volatility_timeframe ? `volatility_${p.volatility_timeframe}` : "volatility";
+  const volatility = Number.isFinite(Number(p.volatility)) && Number(p.volatility) > 0 ? `${volatilityLabel}=${p.volatility}` : "volatility=unknown";
   const ath = p.price_vs_ath_pct != null ? `price_vs_ath=${p.price_vs_ath_pct.toFixed(0)}%` : "";
 
   const top10 = p.gmgn_token_info_top10_pct != null ? `top10=${p.gmgn_token_info_top10_pct}%` : (p.gmgn_top10_holder_pct != null ? `top10=${p.gmgn_top10_holder_pct}%` : "");
