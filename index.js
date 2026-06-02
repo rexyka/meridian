@@ -29,6 +29,7 @@ import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { evaluateExitAlertsForPositions, formatExitAlerts } from "./tools/exit-alerts.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
@@ -226,6 +227,13 @@ export async function runManagementCycle({ silent = false } = {}) {
       recordPositionSnapshot(p.pool, p);
       return { ...p, recall: recallForPool(p.pool) };
     });
+    const exitAlertsByPosition = await evaluateExitAlertsForPositions(positionData);
+    for (const p of positionData) {
+      p.exit_alerts = exitAlertsByPosition.get(p.position) || [];
+      for (const alert of p.exit_alerts) {
+        log("exit_alerts", `${p.pair}: ${alert.type} - ${alert.reason}`);
+      }
+    }
 
     // JS trailing TP check
     const exitMap = new Map();
@@ -293,6 +301,8 @@ export async function runManagementCycle({ silent = false } = {}) {
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
+      const alertText = formatExitAlerts(p.exit_alerts);
+      if (alertText) line += `\n${alertText}`;
       return line;
     });
 
@@ -1318,6 +1328,7 @@ function renderSettingsMenu(page = "main") {
       ],
       [
         settingButton("Entry: ST", "cfg:set:indicatorEntryPreset:supertrend_break"),
+        settingButton("Entry: ST+BB", "cfg:set:indicatorEntryPreset:supertrend_bb_pullback"),
         settingButton("Entry: RSI", "cfg:set:indicatorEntryPreset:rsi_reversal"),
         settingButton("Entry: ST/RSI", "cfg:set:indicatorEntryPreset:supertrend_or_rsi"),
       ],

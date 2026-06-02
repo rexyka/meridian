@@ -416,6 +416,8 @@ const toolMap = {
       gmgnMinTotalFeeSol: ["gmgn", "minTotalFeeSol"],
       gmgnIndicatorFilter: ["gmgn", "indicatorFilter"],
       gmgnIndicatorInterval: ["gmgn", "indicatorInterval"],
+      gmgnIndicatorEntryPreset: ["gmgn", "indicatorRules", "entryPreset"],
+      gmgnEntryPreset: ["gmgn", "indicatorRules", "entryPreset"],
       gmgnRequireBullishSt: ["gmgn", "indicatorRules", "requireBullishSupertrend"],
       gmgnRejectAtBottom: ["gmgn", "indicatorRules", "rejectAlreadyAtBottom"],
       gmgnRequireAboveSt: ["gmgn", "indicatorRules", "requireAboveSupertrend"],

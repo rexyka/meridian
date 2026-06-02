@@ -155,6 +155,7 @@ export const config = {
     indicatorRules: (() => {
       const r = gmgnUserConfig.indicatorRules || {};
       return {
+        entryPreset:              r.entryPreset              ?? r.preset ?? null,
         requireBullishSupertrend: r.requireBullishSupertrend ?? true,
         rejectAlreadyAtBottom:    r.rejectAlreadyAtBottom    ?? true,
         requireAboveSupertrend:   r.requireAboveSupertrend   ?? false,

@@ -26,21 +26,35 @@ function safeNum(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function buildSignalSummary(payload) {
+export function buildSignalSummary(payload) {
   const latest = payload?.latest || {};
   const candle = latest?.candle || {};
   const previousCandle = latest?.previousCandle || {};
   const rsi = safeNum(latest?.rsi?.value);
   const bollinger = latest?.bollinger || {};
+  const lowerBand = safeNum(bollinger.lower);
+  const middleBand = safeNum(bollinger.middle);
+  const upperBand = safeNum(bollinger.upper);
   const supertrend = latest?.supertrend || {};
   const fibonacciLevels = latest?.fibonacci?.levels || {};
+  const close = safeNum(candle.close);
+  let bbPosition = "unknown";
+  let bbPositionPct = null;
+  if (close != null && lowerBand != null && upperBand != null && upperBand > lowerBand) {
+    bbPositionPct = (close - lowerBand) / (upperBand - lowerBand);
+    if (close > upperBand) bbPosition = "above";
+    else if (close < lowerBand) bbPosition = "below";
+    else bbPosition = "inside";
+  }
   return {
-    close: safeNum(candle.close),
+    close,
     previousClose: safeNum(previousCandle.close),
     rsi,
-    lowerBand: safeNum(bollinger.lower),
-    middleBand: safeNum(bollinger.middle),
-    upperBand: safeNum(bollinger.upper),
+    lowerBand,
+    middleBand,
+    upperBand,
+    bbPosition,
+    bbPositionPct: bbPositionPct != null ? Number(bbPositionPct.toFixed(4)) : null,
     supertrendValue: safeNum(supertrend.value),
     supertrendDirection: String(supertrend.direction || "unknown"),
     supertrendBreakUp: !!latest?.states?.supertrendBreakUp,
@@ -51,7 +65,7 @@ function buildSignalSummary(payload) {
   };
 }
 
-function evaluatePreset(side, preset, payload) {
+export function evaluateIndicatorPreset(side, preset, payload) {
   const summary = buildSignalSummary(payload);
   const oversold = Number(config.indicators.rsiOversold ?? 30);
   const overbought = Number(config.indicators.rsiOverbought ?? 80);
@@ -59,9 +73,13 @@ function evaluatePreset(side, preset, payload) {
   const previousClose = summary.previousClose;
   const lowerBand = summary.lowerBand;
   const upperBand = summary.upperBand;
+  const middleBand = summary.middleBand;
   const rsi = summary.rsi;
   const isBullish = summary.supertrendDirection === "bullish";
   const isBearish = summary.supertrendDirection === "bearish";
+  const priceAboveSupertrend = close != null && summary.supertrendValue != null && close >= summary.supertrendValue;
+  const priceInsideBb = summary.bbPosition === "inside";
+  const rsiInPullbackBand = rsi != null && rsi >= oversold && rsi <= overbought;
   const crossedUp = (level) =>
     level != null &&
     close != null &&
@@ -86,6 +104,25 @@ function evaluatePreset(side, preset, payload) {
         : {
             confirmed: summary.supertrendBreakDown || (isBearish && close != null && summary.supertrendValue != null && close <= summary.supertrendValue),
             reason: summary.supertrendBreakDown ? "Supertrend flipped bearish" : "Price is below bearish Supertrend",
+            signal: summary,
+          };
+    case "supertrend_bb_pullback":
+      return side === "entry"
+        ? {
+            confirmed:
+              (summary.supertrendBreakUp || isBullish) &&
+              priceAboveSupertrend &&
+              priceInsideBb &&
+              rsiInPullbackBand,
+            reason: "Bullish Supertrend with price above Supertrend, inside BB, and RSI cooled inside configured bounds",
+            signal: summary,
+          }
+        : {
+            confirmed:
+              summary.supertrendBreakDown ||
+              (isBearish && close != null && summary.supertrendValue != null && close <= summary.supertrendValue) ||
+              (close != null && middleBand != null && close < middleBand && rsi != null && rsi < 50),
+            reason: "Pullback setup weakened: bearish Supertrend or price lost BB middle with weak RSI",
             signal: summary,
           };
     case "rsi_reversal":
@@ -264,7 +301,7 @@ export async function confirmIndicatorPreset({
   for (const interval of targets) {
     try {
       const payload = await fetchChartIndicatorsForMint(mint, { interval, refresh });
-      const evaluation = evaluatePreset(side, preset, payload);
+      const evaluation = evaluateIndicatorPreset(side, preset, payload);
       results.push({
         interval,
         ok: true,

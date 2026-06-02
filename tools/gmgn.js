@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import { setDefaultResultOrder } from "dns";
 import { config } from "../config.js";
 import { log } from "../logger.js";
-import { fetchChartIndicatorsForMint } from "./chart-indicators.js";
+import { evaluateIndicatorPreset, fetchChartIndicatorsForMint } from "./chart-indicators.js";
 
 // Force IPv4 — GMGN OpenAPI does not support IPv6
 setDefaultResultOrder("ipv4first");
@@ -301,6 +301,44 @@ function analyzeHoldersAndTraders(holders = [], traders = []) {
   };
 }
 
+export async function getGmgnHolderExitSignalsForMint(mint) {
+  if (!mint) return null;
+  const [holdersPayload, tradersPayload] = await Promise.all([
+    gmgnFetch("/v1/market/token_top_holders", {
+      params: {
+        chain: "sol",
+        address: mint,
+        limit: config.gmgn.holdersLimit || 100,
+        order_by: "amount_percentage",
+        direction: "desc",
+      },
+    }),
+    gmgnFetch("/v1/market/token_top_traders", {
+      params: {
+        chain: "sol",
+        address: mint,
+        limit: config.gmgn.holdersLimit || 100,
+        order_by: "profit",
+        direction: "desc",
+      },
+    }),
+  ]);
+  const holders = unwrapList(holdersPayload, ["list", "holders", "data"]);
+  const traders = unwrapList(tradersPayload, ["list", "traders", "data"]);
+  const analysis = analyzeHoldersAndTraders(holders, traders);
+  return {
+    smartHolding: analysis.smartHolding,
+    smartAccumulating: analysis.smartAccumulating,
+    smartExiting: analysis.smartExiting,
+    mostlyExited: analysis.mostlyExited,
+    preferredKolHolding: analysis.preferredKolHolding,
+    dumpKolSignificantCount: analysis.dumpKolSignificantCount,
+    dumpKolMinorCount: analysis.dumpKolMinorCount,
+    dumpKolHolders: analysis.dumpKolHolders,
+    kolHolding: analysis.kolHolding,
+  };
+}
+
 
 async function fetchTopMeteoraDlmmPoolsForMint(mint, minTvl = 0, limit = 2) {
   const filterBy = minTvl > 0 ? `&filter_by=${encodeURIComponent(`tvl>${minTvl}`)}` : "";
@@ -494,6 +532,9 @@ async function checkBounceSetup(mint) {
   let bbPosition = "inside";
   if (close > 0 && upperBand > 0 && close > upperBand) bbPosition = "above";
   else if (close > 0 && lowerBand > 0 && close < lowerBand) bbPosition = "below";
+  const bbPositionPct = close > 0 && lowerBand > 0 && upperBand > lowerBand
+    ? Number(((close - lowerBand) / (upperBand - lowerBand)).toFixed(4))
+    : null;
 
   let rsiLabel = null;
   if (Number.isFinite(rsiValue)) {
@@ -504,6 +545,13 @@ async function checkBounceSetup(mint) {
 
   const rules = config.gmgn.indicatorRules || {};
   const reasons = [];
+
+  if (rules.entryPreset) {
+    const presetCheck = evaluateIndicatorPreset("entry", rules.entryPreset, payload);
+    if (!presetCheck.confirmed) {
+      reasons.push(`${rules.entryPreset}: ${presetCheck.reason}`);
+    }
+  }
 
   if (rules.requireBullishSupertrend !== false && !isBullish)
     reasons.push(`no bounce support: ${stDirection} supertrend`);
@@ -531,9 +579,11 @@ async function checkBounceSetup(mint) {
       rsi: Number.isFinite(rsiValue) ? Number(rsiValue.toFixed(1)) : null,
       rsiLabel,
       bbPosition,
+      bbPositionPct,
       supertrendDirection: stDirection || null,
       supertrendBreakUp: stBreakUp,
       aboveSupertrend: close > 0 && stValue > 0 ? close >= stValue : null,
+      entryPreset: rules.entryPreset || null,
     },
   };
 }
@@ -729,8 +779,9 @@ export function formatGmgnCandidateForPrompt(p) {
     const interval = ind.interval ? `[${ind.interval}]` : "";
     const st = ind.supertrendDirection ? `supertrend=${ind.supertrendDirection}${ind.supertrendBreakUp ? " (breakup)" : ""}` : "";
     const rsi = ind.rsi != null ? `rsi=${ind.rsi} ${ind.rsiLabel || ""}`.trim() : "";
-    const bb = ind.bbPosition ? `bb=${ind.bbPosition}` : "";
-    const parts = [st, rsi, bb].filter(Boolean).join(" | ");
+    const bb = ind.bbPosition ? `bb=${ind.bbPosition}${ind.bbPositionPct != null ? `(${ind.bbPositionPct})` : ""}` : "";
+    const preset = ind.entryPreset ? `preset=${ind.entryPreset}` : "";
+    const parts = [preset, st, rsi, bb].filter(Boolean).join(" | ");
     if (parts) indLine = `\n  Indicators ${interval}: ${parts}`;
   }
 

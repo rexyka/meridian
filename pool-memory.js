@@ -315,6 +315,11 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
     pnl_usd: snapshot.pnl_usd ?? null,
     in_range: snapshot.in_range ?? null,
     unclaimed_fees_usd: snapshot.unclaimed_fees_usd ?? null,
+    total_value_usd: snapshot.total_value_usd ?? null,
+    fee_per_tvl_24h: snapshot.fee_per_tvl_24h ?? null,
+    active_bin: snapshot.active_bin ?? null,
+    lower_bin: snapshot.lower_bin ?? null,
+    upper_bin: snapshot.upper_bin ?? null,
     minutes_out_of_range: snapshot.minutes_out_of_range ?? null,
     age_minutes: snapshot.age_minutes ?? null,
   });
@@ -325,6 +330,18 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
   }
 
   save(db);
+}
+
+export function getRecentPositionSnapshots(poolAddress, { position = null, limit = 6 } = {}) {
+  if (!poolAddress) return [];
+  const db = load();
+  const snapshots = Array.isArray(db[poolAddress]?.snapshots)
+    ? db[poolAddress].snapshots
+    : [];
+  const filtered = position
+    ? snapshots.filter((snapshot) => snapshot.position === position)
+    : snapshots;
+  return filtered.slice(-Math.max(1, Number(limit) || 6));
 }
 
 /**
