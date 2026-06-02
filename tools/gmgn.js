@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import { setDefaultResultOrder } from "dns";
 import { config } from "../config.js";
 import { log } from "../logger.js";
-import { evaluateIndicatorPreset, fetchChartIndicatorsForMint } from "./chart-indicators.js";
+import { buildSignalSummary, evaluateIndicatorPreset, fetchChartIndicatorsForMint } from "./chart-indicators.js";
 
 // Force IPv4 — GMGN OpenAPI does not support IPv6
 setDefaultResultOrder("ipv4first");
@@ -504,6 +504,102 @@ function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAn
   };
 }
 
+function isBullishSupertrend(signal) {
+  return signal?.supertrendDirection === "bullish" || !!signal?.supertrendBreakUp;
+}
+
+function isAboveSupertrend(signal) {
+  return signal?.close != null &&
+    signal?.supertrendValue != null &&
+    signal.close >= signal.supertrendValue;
+}
+
+function rsiLabelFor(value) {
+  const rsiValue = Number(value);
+  if (!Number.isFinite(rsiValue)) return null;
+  if (rsiValue < 35) return "oversold";
+  if (rsiValue > 65) return "overbought";
+  return "neutral";
+}
+
+function checkNumericRange(reasons, label, value, minValue, maxValue) {
+  if (value == null) {
+    reasons.push(`${label} unavailable`);
+    return;
+  }
+  if (minValue != null && value < minValue) {
+    reasons.push(`${label} ${value.toFixed(1)} < ${minValue}`);
+  }
+  if (maxValue != null && value > maxValue) {
+    reasons.push(`${label} ${value.toFixed(1)} > ${maxValue}`);
+  }
+}
+
+async function checkSupertrendBbPullback(mint) {
+  const rules = config.gmgn.indicatorRules || {};
+  const [payload5m, payload15m] = await Promise.all([
+    fetchChartIndicatorsForMint(mint, { interval: "5_MINUTE" }),
+    fetchChartIndicatorsForMint(mint, { interval: "15_MINUTE" }),
+  ]);
+  const signal5m = buildSignalSummary(payload5m);
+  const signal15m = buildSignalSummary(payload15m);
+  const reasons = [];
+
+  const rsi5m = Number.isFinite(Number(signal5m.rsi)) ? Number(signal5m.rsi) : null;
+  const rsi15m = Number.isFinite(Number(signal15m.rsi)) ? Number(signal15m.rsi) : null;
+  const bbPositionPct5m = Number.isFinite(Number(signal5m.bbPositionPct)) ? Number(signal5m.bbPositionPct) : null;
+
+  if (rules.pullbackRequire15mBullishSupertrend !== false && !isBullishSupertrend(signal15m)) {
+    reasons.push(`15m Supertrend ${signal15m.supertrendDirection || "unknown"} not bullish`);
+  }
+  if (rules.pullbackRequire15mAboveSupertrend !== false && !isAboveSupertrend(signal15m)) {
+    reasons.push("15m price below Supertrend");
+  }
+  if (rules.pullbackRequire5mAboveSupertrend !== false && !isAboveSupertrend(signal5m)) {
+    reasons.push("5m price below Supertrend");
+  }
+  if (signal5m.bbPosition === "below") {
+    reasons.push("5m price below lower BB");
+  }
+
+  checkNumericRange(reasons, "5m RSI", rsi5m, rules.pullbackMinRsi5m, rules.pullbackMaxRsi5m);
+  checkNumericRange(reasons, "15m RSI", rsi15m, rules.pullbackMinRsi15m, rules.pullbackMaxRsi15m);
+
+  if (bbPositionPct5m == null) {
+    reasons.push("5m BB position unavailable");
+  } else {
+    if (rules.pullbackMinBbPosition5m != null && bbPositionPct5m < rules.pullbackMinBbPosition5m) {
+      reasons.push(`5m BB position ${bbPositionPct5m.toFixed(2)} < ${rules.pullbackMinBbPosition5m}`);
+    }
+    if (rules.pullbackMaxBbPosition5m != null && bbPositionPct5m > rules.pullbackMaxBbPosition5m) {
+      reasons.push(`5m BB position ${bbPositionPct5m.toFixed(2)} > ${rules.pullbackMaxBbPosition5m}`);
+    }
+  }
+
+  return {
+    passed: reasons.length === 0,
+    reasons,
+    signal: {
+      interval: "5m/15m",
+      rsi: rsi5m != null ? Number(rsi5m.toFixed(1)) : null,
+      rsiLabel: rsiLabelFor(rsi5m),
+      bbPosition: signal5m.bbPosition,
+      bbPositionPct: bbPositionPct5m != null ? Number(bbPositionPct5m.toFixed(4)) : null,
+      supertrendDirection: signal15m.supertrendDirection || null,
+      supertrendBreakUp: signal15m.supertrendBreakUp,
+      aboveSupertrend: isAboveSupertrend(signal15m),
+      entryPreset: "supertrend_bb_pullback",
+      rsi5m: rsi5m != null ? Number(rsi5m.toFixed(1)) : null,
+      rsi15m: rsi15m != null ? Number(rsi15m.toFixed(1)) : null,
+      bbPosition5m: signal5m.bbPosition,
+      bbPositionPct5m: bbPositionPct5m != null ? Number(bbPositionPct5m.toFixed(4)) : null,
+      supertrend15m: signal15m.supertrendDirection || null,
+      aboveSupertrend5m: isAboveSupertrend(signal5m),
+      aboveSupertrend15m: isAboveSupertrend(signal15m),
+    },
+  };
+}
+
 // SOL deployed in bins BELOW current price.
 // Token dumps down through bins (fees collected) then bounces back up (more fees).
 // Need: (1) token not already at bottom — needs room to dump into range,
@@ -545,11 +641,19 @@ async function checkBounceSetup(mint) {
 
   const rules = config.gmgn.indicatorRules || {};
   const reasons = [];
+  let presetSignal = null;
 
   if (rules.entryPreset) {
-    const presetCheck = evaluateIndicatorPreset("entry", rules.entryPreset, payload);
-    if (!presetCheck.confirmed) {
-      reasons.push(`${rules.entryPreset}: ${presetCheck.reason}`);
+    const presetCheck = rules.entryPreset === "supertrend_bb_pullback"
+      ? await checkSupertrendBbPullback(mint)
+      : evaluateIndicatorPreset("entry", rules.entryPreset, payload);
+    presetSignal = presetCheck.signal || null;
+    const presetPassed = presetCheck.confirmed ?? presetCheck.passed ?? false;
+    if (!presetPassed) {
+      const presetReasons = Array.isArray(presetCheck.reasons) && presetCheck.reasons.length
+        ? presetCheck.reasons
+        : [presetCheck.reason || "not confirmed"];
+      reasons.push(...presetReasons.map((reason) => `${rules.entryPreset}: ${reason}`));
     }
   }
 
@@ -584,6 +688,7 @@ async function checkBounceSetup(mint) {
       supertrendBreakUp: stBreakUp,
       aboveSupertrend: close > 0 && stValue > 0 ? close >= stValue : null,
       entryPreset: rules.entryPreset || null,
+      ...(presetSignal || {}),
     },
   };
 }
@@ -777,11 +882,21 @@ export function formatGmgnCandidateForPrompt(p) {
   if (p.indicators) {
     const ind = p.indicators;
     const interval = ind.interval ? `[${ind.interval}]` : "";
-    const st = ind.supertrendDirection ? `supertrend=${ind.supertrendDirection}${ind.supertrendBreakUp ? " (breakup)" : ""}` : "";
-    const rsi = ind.rsi != null ? `rsi=${ind.rsi} ${ind.rsiLabel || ""}`.trim() : "";
-    const bb = ind.bbPosition ? `bb=${ind.bbPosition}${ind.bbPositionPct != null ? `(${ind.bbPositionPct})` : ""}` : "";
     const preset = ind.entryPreset ? `preset=${ind.entryPreset}` : "";
-    const parts = [preset, st, rsi, bb].filter(Boolean).join(" | ");
+    let parts;
+    if (ind.entryPreset === "supertrend_bb_pullback" && (ind.rsi5m != null || ind.rsi15m != null)) {
+      const st15m = ind.supertrend15m ? `st15m=${ind.supertrend15m}${ind.aboveSupertrend15m === false ? " below" : ""}` : "";
+      const st5m = ind.aboveSupertrend5m != null ? `aboveSt5m=${ind.aboveSupertrend5m}` : "";
+      const rsi5m = ind.rsi5m != null ? `rsi5m=${ind.rsi5m}` : "";
+      const rsi15m = ind.rsi15m != null ? `rsi15m=${ind.rsi15m}` : "";
+      const bb5m = ind.bbPosition5m ? `bb5m=${ind.bbPosition5m}${ind.bbPositionPct5m != null ? `(${ind.bbPositionPct5m})` : ""}` : "";
+      parts = [preset, st15m, st5m, rsi5m, rsi15m, bb5m].filter(Boolean).join(" | ");
+    } else {
+      const st = ind.supertrendDirection ? `supertrend=${ind.supertrendDirection}${ind.supertrendBreakUp ? " (breakup)" : ""}` : "";
+      const rsi = ind.rsi != null ? `rsi=${ind.rsi} ${ind.rsiLabel || ""}`.trim() : "";
+      const bb = ind.bbPosition ? `bb=${ind.bbPosition}${ind.bbPositionPct != null ? `(${ind.bbPositionPct})` : ""}` : "";
+      parts = [preset, st, rsi, bb].filter(Boolean).join(" | ");
+    }
     if (parts) indLine = `\n  Indicators ${interval}: ${parts}`;
   }
 

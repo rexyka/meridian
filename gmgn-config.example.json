@@ -46,6 +46,15 @@
     "requireAboveSupertrend": false,
     "minRsi": null,
     "maxRsi": null,
-    "requireBbPosition": null
+    "requireBbPosition": null,
+    "pullbackMinRsi5m": 35,
+    "pullbackMaxRsi5m": 90,
+    "pullbackMinRsi15m": 40,
+    "pullbackMaxRsi15m": null,
+    "pullbackMinBbPosition5m": 0.35,
+    "pullbackMaxBbPosition5m": 0.9,
+    "pullbackRequire5mAboveSupertrend": true,
+    "pullbackRequire15mAboveSupertrend": true,
+    "pullbackRequire15mBullishSupertrend": true
   }
 }
