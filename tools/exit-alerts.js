@@ -473,9 +473,99 @@ export async function evaluateExitAlertsForPositions(positions) {
   return new Map(results.map((result) => [result.position, result.alerts]));
 }
 
+export function summarizeExitAlertCluster(alerts = []) {
+  const types = new Set(alerts.map((alert) => alert.type));
+  const has = (type) => types.has(type);
+  const highCount = alerts.filter((alert) => alert.severity === "high").length;
+
+  if (!alerts.length) {
+    return {
+      level: "OK",
+      color: "green",
+      icon: "🟢",
+      label: "OK",
+      reason: "No exit alerts.",
+    };
+  }
+
+  const strongReasons = [];
+  if (has("DUMP_RISK") && has("SMART_WALLET_EXIT")) {
+    strongReasons.push("dump risk plus smart-wallet exit");
+  }
+  if (has("DUMP_RISK") && has("RANGE_PRESSURE")) {
+    strongReasons.push("dump risk near lower range");
+  }
+  if (has("DUMP_RISK") && has("BIN_VELOCITY")) {
+    strongReasons.push("fast bin drop during dump risk");
+  }
+  if (has("SMART_WALLET_EXIT") && has("WEAKNESS_WARNING")) {
+    strongReasons.push("smart wallets exiting while price is weak");
+  }
+  if (has("TP_SERIOUS_ZONE") && has("TP_EXHAUSTION_VOLUME_FADE")) {
+    strongReasons.push("serious TP zone with fading volume");
+  }
+  if (has("LIQUIDITY_DRAIN") && (has("WEAKNESS_WARNING") || has("DUMP_RISK"))) {
+    strongReasons.push("liquidity drain with weak price action");
+  }
+
+  if (strongReasons.length || highCount >= 2) {
+    return {
+      level: "MANUAL_EXIT_STRONG",
+      color: "red",
+      icon: "🔴",
+      label: "MANUAL_EXIT_STRONG",
+      reason: strongReasons[0] || `${highCount} high-severity alerts clustered`,
+    };
+  }
+
+  if (
+    highCount >= 1 ||
+    has("TP_SERIOUS_ZONE") ||
+    has("DUMP_RISK") ||
+    has("RANGE_PRESSURE") ||
+    has("BIN_VELOCITY") ||
+    has("SMART_WALLET_EXIT") ||
+    has("TP_EXHAUSTION_VOLUME_FADE")
+  ) {
+    return {
+      level: "CAUTION",
+      color: "yellow",
+      icon: "🟡",
+      label: "CAUTION",
+      reason: "High-risk or profit-exhaustion alert present.",
+    };
+  }
+
+  if (
+    has("WEAKNESS_WARNING") ||
+    has("FEE_DECAY") ||
+    has("LIQUIDITY_DRAIN") ||
+    has("MACD_BEARISH_CONFIRMATION")
+  ) {
+    return {
+      level: "WATCH",
+      color: "yellow",
+      icon: "🟡",
+      label: "WATCH",
+      reason: "Early weakness or decay alert present.",
+    };
+  }
+
+  return {
+    level: "INFO",
+    color: "green",
+    icon: "🟢",
+    label: "INFO",
+    reason: "Informational exit context only.",
+  };
+}
+
 export function formatExitAlerts(alerts = []) {
   if (!alerts.length) return "";
+  const cluster = summarizeExitAlertCluster(alerts);
+  const header = `Exit alert cluster ${cluster.icon} ${cluster.label}: ${cluster.reason}`;
   return alerts
     .map((alert) => `Exit alert ${alert.type}: ${alert.reason}`)
+    .reduce((lines, line) => [...lines, line], [header, "Alert-only: no auto-close executed."])
     .join("\n");
 }
