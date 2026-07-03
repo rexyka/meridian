@@ -115,6 +115,115 @@ function optionalNum(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function gmgnNumber(key, fallback = null) {
+  const n = optionalNum(config.gmgn?.[key]);
+  return n != null ? n : fallback;
+}
+
+function ratioThreshold(value, fallback) {
+  const n = optionalNum(value);
+  const raw = n != null ? n : fallback;
+  if (raw == null) return null;
+  return raw > 1 ? raw / 100 : raw;
+}
+
+function percentThreshold(value, fallback) {
+  const n = optionalNum(value);
+  const raw = n != null ? n : fallback;
+  if (raw == null) return null;
+  return raw <= 1 ? raw * 100 : raw;
+}
+
+function isGmgnGuardEnabled(key, fallback = true) {
+  const value = config.gmgn?.[key];
+  if (value == null) return fallback;
+  const text = String(value).trim().toLowerCase();
+  return !(value === false || value === 0 || text === "false" || text === "0" || text === "no" || text === "off");
+}
+
+function getPayloadCandles(payload) {
+  const candidates = [
+    payload?.candles,
+    payload?.ohlcv,
+    payload?.list,
+    payload?.data?.candles,
+    payload?.data?.ohlcv,
+    payload?.data?.list,
+    payload?.data?.data?.candles,
+    payload?.data?.data?.ohlcv,
+    payload?.result?.candles,
+  ];
+  return candidates.find((entry) => Array.isArray(entry) && entry.length > 0) || [];
+}
+
+function candleVolume(candle) {
+  if (Array.isArray(candle)) {
+    return optionalNum(candle[5] ?? candle[6]);
+  }
+  return optionalNum(
+    candle?.volumeUsd ??
+    candle?.volume_usd ??
+    candle?.quoteVolume ??
+    candle?.quote_volume ??
+    candle?.volume ??
+    candle?.v,
+  );
+}
+
+function getSingleCandleVolumeSpike(payload) {
+  if (!isGmgnGuardEnabled("rejectSingleVolumeSpike", true)) return null;
+  const volumes = getPayloadCandles(payload)
+    .map(candleVolume)
+    .filter((value) => value != null && value > 0);
+  if (volumes.length < 3) return null;
+  const total = volumes.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) return null;
+  const maxVolume = Math.max(...volumes);
+  const share = maxVolume / total;
+  const threshold = ratioThreshold(config.gmgn?.maxSingleCandleVolumeShare, 0.7);
+  return {
+    rejected: threshold != null && share >= threshold,
+    share,
+    threshold,
+    candles: volumes.length,
+  };
+}
+
+function appendPumpTopRejectReasons(reasons, { rsiValue, bbPosition, bbPositionPct }) {
+  if (!isGmgnGuardEnabled("rejectPumpTop", true)) return;
+
+  const maxBbPosition = ratioThreshold(config.gmgn?.maxPumpTopBbPositionPct, 0.9);
+  const maxRsi = gmgnNumber("maxPumpTopRsi", 85);
+
+  if (bbPosition === "above") {
+    reasons.push("pump-top: price above upper BB");
+  } else if (bbPositionPct != null && maxBbPosition != null && bbPositionPct >= maxBbPosition) {
+    reasons.push(`pump-top: BB position ${(bbPositionPct * 100).toFixed(1)}% >= ${(maxBbPosition * 100).toFixed(0)}%`);
+  }
+
+  if (rsiValue != null && maxRsi != null && rsiValue >= maxRsi) {
+    reasons.push(`pump-top: RSI ${rsiValue.toFixed(1)} >= ${maxRsi}`);
+  }
+}
+
+function getPoolRecentHighRejectReason(poolDetail) {
+  if (!isGmgnGuardEnabled("rejectPumpTop", true)) return null;
+
+  const trend = Array.isArray(poolDetail?.price_trend)
+    ? poolDetail.price_trend.map(optionalNum).filter((value) => value != null && value > 0)
+    : [];
+  const currentPrice = optionalNum(poolDetail?.pool_price ?? poolDetail?.price) ?? (trend.length ? trend[trend.length - 1] : null);
+  const recentHigh = optionalNum(poolDetail?.max_price) ?? (trend.length >= 3 ? Math.max(...trend) : null);
+  if (currentPrice == null || recentHigh == null || currentPrice <= 0 || recentHigh <= 0) return null;
+
+  const priceVsRecentHighPct = (currentPrice / recentHigh) * 100;
+  const maxPct = percentThreshold(config.gmgn?.maxPriceVsRecentHighPct, 97);
+  if (maxPct != null && priceVsRecentHighPct >= maxPct) {
+    return `price ${priceVsRecentHighPct.toFixed(1)}% of recent pool high >= ${maxPct}%`;
+  }
+  return null;
+}
+
 function boolish(value) {
   return value === true || value === 1 || value === "1" || String(value).toLowerCase() === "true" || String(value).toLowerCase() === "yes";
 }
@@ -548,6 +657,7 @@ async function checkSupertrendBbPullback(mint) {
   const rsi5m = Number.isFinite(Number(signal5m.rsi)) ? Number(signal5m.rsi) : null;
   const rsi15m = Number.isFinite(Number(signal15m.rsi)) ? Number(signal15m.rsi) : null;
   const bbPositionPct5m = Number.isFinite(Number(signal5m.bbPositionPct)) ? Number(signal5m.bbPositionPct) : null;
+  const volumeSpike = getSingleCandleVolumeSpike(payload5m);
 
   if (rules.pullbackRequire15mBullishSupertrend !== false && !isBullishSupertrend(signal15m)) {
     reasons.push(`15m Supertrend ${signal15m.supertrendDirection || "unknown"} not bullish`);
@@ -560,6 +670,14 @@ async function checkSupertrendBbPullback(mint) {
   }
   if (signal5m.bbPosition === "below") {
     reasons.push("5m price below lower BB");
+  }
+  appendPumpTopRejectReasons(reasons, {
+    rsiValue: rsi5m,
+    bbPosition: signal5m.bbPosition,
+    bbPositionPct: bbPositionPct5m,
+  });
+  if (volumeSpike?.rejected) {
+    reasons.push(`single-candle volume spike: ${(volumeSpike.share * 100).toFixed(1)}% >= ${(volumeSpike.threshold * 100).toFixed(0)}%`);
   }
 
   checkNumericRange(reasons, "5m RSI", rsi5m, rules.pullbackMinRsi5m, rules.pullbackMaxRsi5m);
@@ -596,6 +714,7 @@ async function checkSupertrendBbPullback(mint) {
       supertrend15m: signal15m.supertrendDirection || null,
       aboveSupertrend5m: isAboveSupertrend(signal5m),
       aboveSupertrend15m: isAboveSupertrend(signal15m),
+      volumeSpikeShare: volumeSpike?.share != null ? Number(volumeSpike.share.toFixed(4)) : null,
     },
   };
 }
@@ -607,6 +726,7 @@ async function checkSupertrendBbPullback(mint) {
 async function checkBounceSetup(mint) {
   const interval = String(config.gmgn.indicatorInterval || "15_MINUTE").trim().toUpperCase();
   const payload = await fetchChartIndicatorsForMint(mint, { interval });
+  const volumeSpike = getSingleCandleVolumeSpike(payload);
   const latest = payload?.latest || {};
   const st = latest?.supertrend || {};
   const stValue = Number(st.value) || 0;
@@ -675,6 +795,11 @@ async function checkBounceSetup(mint) {
   if (rules.requireBbPosition != null && bbPosition !== rules.requireBbPosition)
     reasons.push(`BB position ${bbPosition} ≠ required ${rules.requireBbPosition}`);
 
+  appendPumpTopRejectReasons(reasons, { rsiValue, bbPosition, bbPositionPct });
+  if (volumeSpike?.rejected) {
+    reasons.push(`single-candle volume spike: ${(volumeSpike.share * 100).toFixed(1)}% >= ${(volumeSpike.threshold * 100).toFixed(0)}%`);
+  }
+
   return {
     passed: reasons.length === 0,
     reasons,
@@ -688,6 +813,7 @@ async function checkBounceSetup(mint) {
       supertrendBreakUp: stBreakUp,
       aboveSupertrend: close > 0 && stValue > 0 ? close >= stValue : null,
       entryPreset: rules.entryPreset || null,
+      volumeSpikeShare: volumeSpike?.share != null ? Number(volumeSpike.share.toFixed(4)) : null,
       ...(presetSignal || {}),
     },
   };
@@ -809,6 +935,12 @@ export async function discoverGmgnPools({ limit = 10 } = {}) {
       const { pool, detail: poolDetail } = await pickBestPool(topPools);
       if (!pool) {
         filtered.push({ stage: 5, name: token.symbol || mint, reason: "pool selection failed" });
+        continue;
+      }
+      const recentHighRejectReason = getPoolRecentHighRejectReason(poolDetail);
+      if (recentHighRejectReason) {
+        log("gmgn", `Stage5 skip ${token.symbol || mint}: ${recentHighRejectReason}`);
+        filtered.push({ stage: 5, name: token.symbol || mint, reason: recentHighRejectReason });
         continue;
       }
       const security = {};
