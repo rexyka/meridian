@@ -1051,3 +1051,24 @@ export function formatGmgnCandidateForPrompt(p) {
 function round(n) {
   return n != null ? Math.round(n) : null;
 }
+
+// ─── Fee source for the minTokenFeesSol gate ────────────────────
+export function hasGmgnApiKey() {
+  return !!(config.gmgn?.apiKey || process.env.GMGN_API_KEY);
+}
+
+// Returns { total_fee, trade_fee } in SOL, or null on missing key / error so
+// callers can fall back to Jupiter's fee figure.
+export async function getGmgnTokenFees(mint) {
+  if (!mint || !hasGmgnApiKey()) return null;
+  try {
+    const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+    const info = payload?.data?.data || payload?.data || payload;
+    if (!info || typeof info !== "object") return null;
+    const toNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+    return { total_fee: toNum(info.total_fee), trade_fee: toNum(info.trade_fee) };
+  } catch (error) {
+    log("gmgn", `token fees lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
+    return null;
+  }
+}

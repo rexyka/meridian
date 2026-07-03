@@ -23,18 +23,16 @@ import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import { execSync, spawn } from "child_process";
+import { REPO_ROOT, repoPath } from "../repo-root.js";
+import { normalizeTimeframe, scaleScreeningToTimeframe } from "../screening-scales.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const USER_CONFIG_PATH = path.join(__dirname, "../user-config.json");
-const GMGN_CONFIG_PATH = path.join(__dirname, "../gmgn-config.json");
+const USER_CONFIG_PATH = repoPath("user-config.json");
+const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
 const TIMEFRAME_MINUTES = {
   "5m": 5,
-  "15m": 15,
   "30m": 30,
   "1h": 60,
   "2h": 120,
@@ -184,7 +182,15 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  return { pass: true };
+  const baseMint = detail?.token_x?.address || detail?.base_token_address || null;
+  const entryMarketData = {
+    entry_mcap: numberOrNull(detail?.token_x?.market_cap ?? detail?.base_token_market_cap),
+    entry_tvl: tvl,
+    entry_volume: numberOrNull(detail?.volume),
+    entry_holders: numberOrNull(detail?.base_token_holders ?? detail?.token_x?.holders),
+  };
+
+  return { pass: true, entryMarketData };
 }
 
 // Registered by index.js so update_config can restart cron jobs when intervals change
@@ -222,7 +228,7 @@ const toolMap = {
   },
   self_update: async () => {
     try {
-      const result = execSync("git pull", { cwd: process.cwd(), encoding: "utf8" }).trim();
+      const result = execSync("git pull", { cwd: REPO_ROOT, encoding: "utf8" }).trim();
       if (result.includes("Already up to date")) {
         return { success: true, updated: false, message: "Already up to date — no restart needed." };
       }
@@ -232,7 +238,7 @@ const toolMap = {
           const child = spawn(process.execPath, process.argv.slice(1), {
             detached: true,
             stdio: "inherit",
-            cwd: process.cwd(),
+            cwd: REPO_ROOT,
           });
           child.unref();
         }
@@ -311,18 +317,19 @@ const toolMap = {
       discordSignalMode: ["screening", "discordSignalMode"],
       avoidPvpSymbols: ["screening", "avoidPvpSymbols"],
       blockPvpSymbols: ["screening", "blockPvpSymbols"],
-      maxBundlePct:     ["screening", "maxBundlePct"],
       maxBotHoldersPct: ["screening", "maxBotHoldersPct"],
       maxTop10Pct: ["screening", "maxTop10Pct"],
       allowedLaunchpads: ["screening", "allowedLaunchpads"],
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
-      athFilterPct:     ["screening", "athFilterPct"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
+      loneCandidateMinDegen: ["screening", "loneCandidateMinDegen"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
+      autoSwapRetryAttempts: ["management", "autoSwapRetryAttempts"],
+      autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
@@ -340,6 +347,18 @@ const toolMap = {
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
+      // pnl poller
+      pnlConfirmTicks: ["pnl", "confirmTicks"],
+      // opportunity poller (interval/enabled changes apply on next restart)
+      opportunityPollEnabled: ["opportunity", "enabled"],
+      opportunityPollIntervalSec: ["opportunity", "pollIntervalSec"],
+      opportunityPollLimit: ["opportunity", "limit"],
+      opportunityMinScore: ["opportunity", "minScore"],
+      opportunitySmartWalletBonus: ["opportunity", "smartWalletScoreBonus"],
+      degenTargetVolRatio: ["opportunity", "targetVolRatio"],
+      degenTargetLpCount: ["opportunity", "targetLpCount"],
+      degenTargetFeeRatio: ["opportunity", "targetFeeRatio"],
+      degenTargetLiquidity: ["opportunity", "targetLiquidity"],
       solMode: ["management", "solMode"],
       minSolToOpen: ["management", "minSolToOpen"],
       deployAmountSol: ["management", "deployAmountSol"],
@@ -376,7 +395,13 @@ const toolMap = {
       publicApiKey: ["api", "publicApiKey"],
       agentMeridianApiUrl: ["api", "url"],
       lpAgentRelayEnabled: ["api", "lpAgentRelayEnabled"],
+      // pnl fetcher / poller
+      pnlSource: ["pnl", "source"],
+      pnlRpcUrl: ["pnl", "rpcUrl"],
+      pnlPollIntervalSec: ["pnl", "pollIntervalSec"],
+      pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec"],
       // GMGN screening
+      gmgnFeeSource: ["gmgn", "feeSource"],
       gmgnApiKey: ["gmgn", "apiKey"],
       gmgnBaseUrl: ["gmgn", "baseUrl"],
       gmgnInterval: ["gmgn", "interval"],
@@ -480,10 +505,31 @@ const toolMap = {
       return { success: false, unknown, reason };
     }
 
+    let userConfig = {};
+    if (fs.existsSync(USER_CONFIG_PATH)) {
+      try {
+        userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
+      } catch (error) {
+        return { success: false, error: `Invalid user-config.json: ${error.message}`, reason };
+      }
+    }
+
+    // Auto-scale fee/volume when timeframe changes (unless user set them explicitly in same call).
+    if (applied.timeframe != null && applied.minFeeActiveTvlRatio == null && applied.minVolume == null) {
+      const tf = normalizeTimeframe(applied.timeframe);
+      applied.timeframe = tf;
+      const scaled = scaleScreeningToTimeframe(tf);
+      applied.minFeeActiveTvlRatio = scaled.minFeeActiveTvlRatio;
+      applied.minVolume = scaled.minVolume;
+      applied._timeframeScaled = true;
+      log("config", `timeframe ${tf} → auto-scaled minFeeActiveTvlRatio=${scaled.minFeeActiveTvlRatio}, minVolume=${scaled.minVolume}`);
+    }
+
     // Apply to live config immediately
     for (const [key, val] of Object.entries(applied)) {
+      if (key.startsWith("_")) continue;
       const [section, field, third] = CONFIG_MAP[key];
-      const isNestedField = typeof third === "string"; // string = nested subfield, array = persistPath
+      const isNestedField = typeof third === "string";
       if (isNestedField) {
         if (!config[section][field] || typeof config[section][field] !== "object") config[section][field] = {};
         const before = config[section][field][third];
@@ -513,10 +559,6 @@ const toolMap = {
     }
 
     // Persist GMGN tuning to gmgn-config.json, and everything else to user-config.json.
-    let userConfig = {};
-    if (fs.existsSync(USER_CONFIG_PATH)) {
-      try { userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8")); } catch { /**/ }
-    }
     let gmgnConfig = {};
     if (fs.existsSync(GMGN_CONFIG_PATH)) {
       try { gmgnConfig = JSON.parse(fs.readFileSync(GMGN_CONFIG_PATH, "utf8")); } catch { /**/ }
@@ -524,6 +566,7 @@ const toolMap = {
     let wroteUserConfig = false;
     let wroteGmgnConfig = false;
     for (const [key, val] of Object.entries(applied)) {
+      if (key.startsWith("_")) continue;
       const [section, field, third] = CONFIG_MAP[key] || [];
       const persistPath = Array.isArray(third) ? third : null;
       const nestedField = typeof third === "string" ? third : null;
@@ -562,7 +605,7 @@ const toolMap = {
     }
 
     // Restart cron jobs if intervals changed
-    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null;
+    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null || applied.pnlPollIntervalSec != null;
     if (intervalChanged && _cronRestarter) {
       _cronRestarter();
       log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m`);
@@ -572,7 +615,7 @@ const toolMap = {
     // (managementIntervalMin / screeningIntervalMin change every deploy based on volatility;
     //  the rule is already in the system prompt, storing it 75+ times is pure noise)
     const lessonsKeys = Object.keys(applied).filter(
-      k => k !== "managementIntervalMin" && k !== "screeningIntervalMin"
+      k => !k.startsWith("_") && k !== "managementIntervalMin" && k !== "screeningIntervalMin"
     );
     if (lessonsKeys.length > 0) {
       const summary = lessonsKeys.map(k => `${k}=${redactConfigValue(k, applied[k])}`).join(", ");
@@ -595,6 +638,42 @@ const PROTECTED_TOOLS = new Set([
   ...WRITE_TOOLS,
   "self_update",
 ]);
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Swap a base token back to SOL with retry. Jupiter can transiently fail (no route,
+ * quote error) and a single attempt silently leaves the token unsold — this retries
+ * with a delay, re-fetching the balance each attempt (amounts can shift on partial
+ * fills). Treats both a throw AND result.success===false / missing tx as failure.
+ * Returns { swapped, result, token } — swapped=false if nothing to do or all attempts failed.
+ */
+async function swapBaseToSolWithRetry(baseMint, label) {
+  const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
+  const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
+  let lastErr = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const balances = await getWalletBalances({});
+      const token = balances.tokens?.find((t) => t.mint === baseMint);
+      if (!token || token.usd < 0.10) {
+        // Nothing left to swap (already sold or dust) — treat as done.
+        return { swapped: attempt > 1, result: null, token: null };
+      }
+      log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})`);
+      const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
+      const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
+      if (ok) return { swapped: true, result: swapResult, token };
+      lastErr = swapResult?.error || swapResult?.reason || "swap returned no tx";
+    } catch (e) {
+      lastErr = e.message;
+    }
+    log("executor_warn", `Auto-swap ${label} attempt ${attempt}/${attempts} failed: ${lastErr}`);
+    if (attempt < attempts) await sleep(delayMs);
+  }
+  log("executor_warn", `Auto-swap ${label} failed after ${attempts} attempts — base token left unsold (${baseMint.slice(0, 8)})`);
+  return { swapped: false, result: null, token: null };
+}
 
 /**
  * Execute a tool call with safety checks and logging.
@@ -651,34 +730,18 @@ export async function executeTool(name, args) {
           const poolAddr = result.pool || args.pool_address;
           if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
         }
-        // Auto-swap base token back to SOL unless user said to hold
+        // Auto-swap base token back to SOL unless user said to hold (retried).
         if (!args.skip_swap && result.base_mint) {
-          try {
-            const balances = await getWalletBalances({});
-            const token = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (token && token.usd >= 0.10) {
-              log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-              // Tell the model the swap already happened so it doesn't call swap_token again
-              result.auto_swapped = true;
-              result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
-              if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
-            }
-          } catch (e) {
-            log("executor_warn", `Auto-swap after close failed: ${e.message}`);
+          const { swapped, result: swapResult } = await swapBaseToSolWithRetry(result.base_mint, "after close");
+          if (swapped) {
+            // Tell the model the swap already happened so it doesn't call swap_token again
+            result.auto_swapped = true;
+            result.auto_swap_note = `Base token already auto-swapped back to SOL (${result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
+            if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
           }
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
-        try {
-          const balances = await getWalletBalances({});
-          const token = balances.tokens?.find(t => t.mint === result.base_mint);
-          if (token && token.usd >= 0.10) {
-            log("executor", `Auto-swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-            await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-          }
-        } catch (e) {
-          log("executor_warn", `Auto-swap after claim failed: ${e.message}`);
-        }
+        await swapBaseToSolWithRetry(result.base_mint, "after claim");
       }
     }
 
@@ -710,6 +773,7 @@ async function runSafetyChecks(name, args) {
     case "deploy_position": {
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
+      if (poolThresholds.entryMarketData) Object.assign(args, poolThresholds.entryMarketData);
 
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;

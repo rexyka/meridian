@@ -1,6 +1,7 @@
 {
   "apiKey": "",
   "baseUrl": "https://openapi.gmgn.ai",
+  "feeSource": "gmgn",
   "interval": "5m",
   "orderBy": "default",
   "direction": "desc",

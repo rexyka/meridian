@@ -11,6 +11,9 @@ node_modules/
 user-config.json
 gmgn-config.json
 
+# Stray Claude Code worktrees
+.claude/worktrees/
+
 # Runtime state (position tracking, lessons — user-specific)
 state.json
 lessons.json

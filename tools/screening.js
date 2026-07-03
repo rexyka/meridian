@@ -12,7 +12,6 @@ const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
 const TIMEFRAME_MINUTES = {
   "5m": 5,
-  "15m": 15,
   "30m": 30,
   "1h": 60,
   "2h": 120,
@@ -20,6 +19,9 @@ const TIMEFRAME_MINUTES = {
   "12h": 720,
   "24h": 1440,
 };
+// Degen Score normalizes window-dependent inputs (volume/fee/LP) to this reference
+// window, so its targets stay valid regardless of the configured screening timeframe.
+const DEGEN_REFERENCE_MINUTES = 30;
 const PVP_SHORTLIST_LIMIT = 2;
 const PVP_RIVAL_LIMIT = 2;
 const PVP_MIN_ACTIVE_TVL = 5_000;
@@ -30,7 +32,7 @@ function normalizeSymbol(symbol) {
   return String(symbol || "").trim().toUpperCase();
 }
 
-function scoreCandidate(pool) {
+export function scoreCandidate(pool) {
   if (Number.isFinite(Number(pool.gmgn_score))) {
     return Number(pool.gmgn_score) + Number(pool.fee_active_tvl_ratio || 0) * 500;
   }
@@ -39,6 +41,55 @@ function scoreCandidate(pool) {
   const volume = Number(pool.volume_window || 0);
   const holders = Number(pool.holders || 0);
   return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+}
+
+/**
+ * Degen Score — a pool's efficiency relative to its liquidity, on a 0..100 scale.
+ * Geometric mean of four liquidity-relative sub-scores so a HIGH score requires balance
+ * across all four (a pool spiking one metric can't dominate):
+ *   1. Recent trading activity   → volume / active_tvl   (volume_active_tvl_ratio)
+ *   2. Recent LP activity        → unique_lps + positions_created
+ *   3. Fees paid to LPs          → fee / active_tvl       (fee_active_tvl_ratio)
+ *   4. Liquidity                 → active_tvl (log floor — dust pools can't win on ratios)
+ * Efficiency only (no momentum/change_pct), per design. Targets are configurable so the
+ * score can be calibrated; each sub-score saturates at its target.
+ *
+ * The volume/fee/LP inputs are measured over `config.screening.timeframe`, so they are
+ * normalized to a fixed 30m reference window before scoring — the targets are expressed
+ * in 30m terms and stay valid even if the timeframe changes (5m, 1h, 24h, …). Liquidity
+ * is a level, not a rate, so it is not scaled.
+ */
+export function degenScore(pool, targets = {}) {
+  const {
+    targetVolRatio = 20,    // (30m) volume/active_tvl that earns a full trading sub-score
+    targetLpCount = 40,     // (30m) unique_lps + positions_created for a full LP sub-score
+    targetFeeRatio = 0.20,  // (30m) fee/active_tvl for a full fee sub-score
+    targetLiquidity = 20000, // active_tvl ($) floor for full liquidity sub-score (not timeframe-scaled)
+  } = targets;
+
+  const La = Number(pool.active_tvl ?? pool.tvl ?? 0);
+  if (!Number.isFinite(La) || La <= 0) return 0;
+
+  const clamp01 = (x) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0);
+
+  // Normalize window-dependent inputs to the 30m reference (rate × scale).
+  const tfMinutes = TIMEFRAME_MINUTES[config.screening.timeframe] || DEGEN_REFERENCE_MINUTES;
+  const tfScale = DEGEN_REFERENCE_MINUTES / tfMinutes;
+
+  const volRatio = Number(pool.volume_active_tvl_ratio);
+  const tradingRatio = (Number.isFinite(volRatio) ? volRatio : Number(pool.volume_window || 0) / La) * tfScale;
+  const feeRatio = (Number.isFinite(Number(pool.fee_active_tvl_ratio))
+    ? Number(pool.fee_active_tvl_ratio)
+    : Number(pool.fee_window || 0) / La) * tfScale;
+  const lpActivity = (Number(pool.unique_lps || 0) + Number(pool.positions_created || 0)) * tfScale;
+
+  const sTrading = clamp01(tradingRatio / targetVolRatio);
+  const sLp      = clamp01(lpActivity / targetLpCount);
+  const sFees    = clamp01(feeRatio / targetFeeRatio);
+  const sLiq     = clamp01(Math.log10(La) / Math.log10(targetLiquidity));
+
+  // Geometric mean (×100). Any zero sub-score → 0, enforcing balance across all four.
+  return (sTrading * sLp * sFees * sLiq) ** 0.25 * 100;
 }
 
 function numeric(value) {
@@ -644,103 +695,19 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     }
   }
 
-  // Enrich with OKX data — advanced info (risk/bundle/sniper) + ATH price (no API key required)
-  // Skipped for GMGN: bundler/bot/wash data already sourced from GMGN pipeline
-  if (source !== "gmgn" && eligible.length > 0) {
-    const { getAdvancedInfo, getPriceInfo, getClusterList, getRiskFlags } = await import("./okx.js");
-    const okxResults = await Promise.allSettled(
-      eligible.map(async (p) => {
-        if (!p.base?.mint) return { adv: null, price: null, clusters: [], risk: null };
-        const [adv, price, clusters, risk] = await Promise.allSettled([
-          getAdvancedInfo(p.base.mint),
-          getPriceInfo(p.base.mint),
-          getClusterList(p.base.mint),
-          getRiskFlags(p.base.mint),
-        ]);
-
-        const mintShort = p.base.mint.slice(0, 8);
-        if (adv.status !== "fulfilled")      log("okx", `advanced-info unavailable for ${p.name} (${mintShort})`);
-        if (price.status !== "fulfilled")    log("okx", `price-info unavailable for ${p.name} (${mintShort})`);
-        if (clusters.status !== "fulfilled") log("okx", `cluster-list unavailable for ${p.name} (${mintShort})`);
-        if (risk.status !== "fulfilled")     log("okx", `risk-check unavailable for ${p.name} (${mintShort})`);
-
-        return {
-          adv: adv.status === "fulfilled" ? adv.value : null,
-          price: price.status === "fulfilled" ? price.value : null,
-          clusters: clusters.status === "fulfilled" ? clusters.value : [],
-          risk: risk.status === "fulfilled" ? risk.value : null,
-        };
-      })
-    );
-    for (let i = 0; i < eligible.length; i++) {
-      const r = okxResults[i];
-      if (r.status !== "fulfilled") continue;
-      const { adv, price, clusters, risk } = r.value;
-      if (adv) {
-        eligible[i].risk_level      = adv.risk_level;
-        eligible[i].bundle_pct      = adv.bundle_pct;
-        eligible[i].sniper_pct      = adv.sniper_pct;
-        eligible[i].suspicious_pct  = adv.suspicious_pct;
-        eligible[i].smart_money_buy = adv.smart_money_buy;
-        eligible[i].dev_sold_all    = adv.dev_sold_all;
-        eligible[i].dex_boost       = adv.dex_boost;
-        eligible[i].dex_screener_paid = adv.dex_screener_paid;
-        if (adv.creator && !eligible[i].dev) eligible[i].dev = adv.creator;
-      }
-      if (risk) {
-        eligible[i].is_rugpull = risk.is_rugpull;
-        eligible[i].is_wash    = risk.is_wash;
-      }
-      if (price) {
-        eligible[i].price_vs_ath_pct = price.price_vs_ath_pct;
-        eligible[i].ath              = price.ath;
-      }
-      if (clusters?.length) {
-        // Surface KOL presence and top cluster trend for LLM
-        eligible[i].kol_in_clusters      = clusters.some((c) => c.has_kol);
-        eligible[i].top_cluster_trend    = clusters[0]?.trend ?? null;      // buy|sell|neutral
-        eligible[i].top_cluster_hold_pct = clusters[0]?.holding_pct ?? null;
-      }
-    }
-    // Wash trading hard filter — fake volume = misleading fee yield
-    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
-      if (p.is_wash) {
-        log("screening", `Risk filter: dropped ${p.name} — wash trading flagged`);
-        pushFilteredReason(filteredOut, p, "wash trading flagged");
-        return false;
-      }
-      return true;
-    }));
-
-    // ATH filter — drop pools where price is too close to ATH
-    const athFilter = config.screening.athFilterPct;
-    if (athFilter != null) {
-      const threshold = 100 + athFilter; // e.g. -20 → threshold = 80 (price must be <= 80% of ATH)
-      const before = eligible.length;
-      eligible.splice(0, eligible.length, ...eligible.filter((p) => {
-        if (p.price_vs_ath_pct == null) return true; // no data → don't filter
-        if (p.price_vs_ath_pct > threshold) {
-          log("screening", `ATH filter: dropped ${p.name} — ${p.price_vs_ath_pct}% of ATH (limit: ${threshold}%)`);
-          pushFilteredReason(filteredOut, p, `${p.price_vs_ath_pct}% of ATH > ${threshold}% limit`);
-          return false;
-        }
-        return true;
-      }));
-      if (eligible.length < before) log("screening", `ATH filter removed ${before - eligible.length} pool(s)`);
-    }
-
-    // Drop any pools whose creator is on the dev blocklist (caught via advanced-info)
+  // Dev blocklist check — filter pools whose creator is on the blocklist
+  if (eligible.length > 0) {
     const before = eligible.length;
     const filtered = eligible.filter((p) => {
       if (p.dev && isDevBlocked(p.dev)) {
-        log("dev_blocklist", `Filtered blocked deployer (okx) ${p.dev.slice(0, 8)} token ${p.base?.symbol}`);
+        log("dev_blocklist", `Filtered blocked deployer ${p.dev.slice(0, 8)} token ${p.base?.symbol}`);
         pushFilteredReason(filteredOut, p, "blocked deployer");
         return false;
       }
       return true;
     });
     eligible.splice(0, eligible.length, ...filtered);
-    if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via OKX creator check`);
+    if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via dev blocklist`);
   }
 
   if (config.indicators.enabled && eligible.length > 0) {
@@ -878,6 +845,12 @@ function condensePool(p) {
     fee_change_pct: fix(p.fee_change_pct, 1),
     swap_count: p.swap_count,
     unique_traders: p.unique_traders,
+
+    // Liquidity-relative + LP-activity metrics (Degen Score inputs)
+    volume_active_tvl_ratio: p.volume_active_tvl_ratio != null ? fix(p.volume_active_tvl_ratio, 4) : null,
+    unique_lps: p.unique_lps,
+    unique_lps_change_pct: fix(p.unique_lps_change_pct, 1),
+    positions_created: p.positions_created,
   };
 }
 
