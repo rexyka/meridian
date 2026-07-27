@@ -418,6 +418,7 @@ const toolMap = {
       gmgnMaxPriceVsRecentHighPct: ["gmgn", "maxPriceVsRecentHighPct"],
       gmgnMaxPumpTopBbPositionPct: ["gmgn", "maxPumpTopBbPositionPct"],
       gmgnMaxPumpTopRsi: ["gmgn", "maxPumpTopRsi"],
+      gmgnMax1hChangePct: ["gmgn", "max1hChangePct"],
       gmgnRejectSingleVolumeSpike: ["gmgn", "rejectSingleVolumeSpike"],
       gmgnMaxSingleCandleVolumeShare: ["gmgn", "maxSingleCandleVolumeShare"],
       gmgnFilters: ["gmgn", "filters"],

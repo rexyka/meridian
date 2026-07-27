@@ -10,6 +10,7 @@ setDefaultResultOrder("ipv4first");
 const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
 const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "6h", "24h"]);
 let lastGmgnRequestAt = 0;
+let _velocityDataLogged = false; // one-time log: confirms 1h price change data is flowing
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -232,6 +233,30 @@ function ratioPct(value) {
   const n = optionalNum(value);
   if (n == null) return null;
   return Number((n * 100).toFixed(2));
+}
+
+// Extract 1h price change from a raw GMGN token entry.
+// GMGN's field naming varies across endpoints — try common variants.
+// Returns null if no field is present (caller treats null as "data unavailable — pass").
+function extract1hPriceChange(token = {}, info = {}, stat = {}) {
+  const candidates = [
+    token.price_change_percent1h,
+    token.price_change_percent_1h,
+    token.price_change_1h,
+    token.price_change_h1,
+    token.change_1h,
+    token.priceChange1h,
+    stat.price_change_percent1h,
+    stat.price_change_1h,
+    stat.change_1h,
+    info.price_change_percent1h,
+    info.price_change_1h,
+  ];
+  for (const value of candidates) {
+    const n = optionalNum(value);
+    if (n != null) return n;
+  }
+  return null;
 }
 
 function hasTag(entry, tag) {
@@ -571,6 +596,7 @@ function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAn
     dev: info.dev?.creator_address || null,
     price: num(info.price || token.price),
     price_change_pct: num(token.price_change_percent5m ?? token.price_change_percent),
+    price_change_1h: extract1hPriceChange(token, info, info?.stat || {}),
     volume: num(token.volume ?? 0),
     swap_count: token.swaps ?? null,
     gmgn: true,
@@ -723,7 +749,7 @@ async function checkSupertrendBbPullback(mint) {
 // Token dumps down through bins (fees collected) then bounces back up (more fees).
 // Need: (1) token not already at bottom — needs room to dump into range,
 //        (2) overall bullish trend — guarantees the bounce back.
-async function checkBounceSetup(mint) {
+async function checkBounceSetup(mint, context = {}) {
   const interval = String(config.gmgn.indicatorInterval || "15_MINUTE").trim().toUpperCase();
   const payload = await fetchChartIndicatorsForMint(mint, { interval });
   const volumeSpike = getSingleCandleVolumeSpike(payload);
@@ -798,6 +824,25 @@ async function checkBounceSetup(mint) {
   appendPumpTopRejectReasons(reasons, { rsiValue, bbPosition, bbPositionPct });
   if (volumeSpike?.rejected) {
     reasons.push(`single-candle volume spike: ${(volumeSpike.share * 100).toFixed(1)}% >= ${(volumeSpike.threshold * 100).toFixed(0)}%`);
+  }
+
+  // 1h velocity rejection — catches parabolic upside momentum that pump-top level checks miss.
+  // Extracts from context (Stage 1/2 candidate object). Passes on missing data per intent.
+  if (rules.max1hChangePct != null || config.gmgn.max1hChangePct != null) {
+    const max1hChange = rules.max1hChangePct ?? config.gmgn.max1hChangePct;
+    const priceChange1h = optionalNum(
+      context?.token?.price_change_1h ??
+      context?.priceChange1h ??
+      extract1hPriceChange(context?.token || {}, context?.info || {}, context?.info?.stat || {})
+    );
+    // One-time validation log: verify data is flowing
+    if (priceChange1h != null && !_velocityDataLogged) {
+      _velocityDataLogged = true;
+      log("gmgn", `[velocity-cap] 1h data OK — sample: ${mint.slice(0, 8)} price_change_1h=${priceChange1h.toFixed(2)}%, threshold=${max1hChange}%`);
+    }
+    if (priceChange1h != null && priceChange1h > max1hChange) {
+      reasons.push(`1h price change ${priceChange1h.toFixed(1)}% > max ${max1hChange}%`);
+    }
   }
 
   return {
@@ -909,7 +954,7 @@ export async function discoverGmgnPools({ limit = 10 } = {}) {
       const mint = entry.token.address;
       let indicatorCheck;
       try {
-        indicatorCheck = await checkBounceSetup(mint);
+        indicatorCheck = await checkBounceSetup(mint, { token: entry.token, info: entry.info });
       } catch (error) {
         log("gmgn", `Stage4 indicator unavailable for ${entry.token.symbol || mint}: ${error.message} — skip filter`);
         indicatorCheck = { passed: true, reasons: [] };

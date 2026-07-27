@@ -42,6 +42,7 @@
   "maxPriceVsRecentHighPct": 97,
   "maxPumpTopBbPositionPct": 0.9,
   "maxPumpTopRsi": 85,
+  "max1hChangePct": 30,
   "rejectSingleVolumeSpike": true,
   "maxSingleCandleVolumeShare": 0.7,
   "indicatorFilter": true,
