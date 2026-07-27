@@ -111,6 +111,32 @@
     "rsiOverbought": 80,
     "requireAllIntervals": false
   },
+  "exitAlerts": {
+    "enabled": true,
+    "thresholds": {
+      "weaknessRsi5m": 25,
+      "weaknessRsi15m": 40,
+      "dumpRsi5m": 20,
+      "volumeFadeRatio": 0.30,
+      "liquidityDrainPct": 40,
+      "activeTvlDrainPct": 50,
+      "binVelocityDrop": 15,
+      "feeDecayMaxPnlPct": -3,
+      "rangePressureBins": 5,
+      "rangePressurePct": 0.15,
+      "feeDecayMinAgeMinutes": 60,
+      "feeDecayLookbackSnapshots": 8,
+      "feeDecayMaxFeeGrowthUsd": 0.03,
+      "feeDecayMaxFeePerTvl24h": 1.5,
+      "tpZonePnlPct": 3,
+      "tpSeriousPnlPct": 5,
+      "tpZoneRsi5m": 85,
+      "tpSeriousRsi5m": 90,
+      "tpSeriousRsi15m": 80,
+      "upperBbPct": 0.8,
+      "seriousUpperBbPct": 0.85
+    }
+  },
   "telegramChatId": "",
   "hiveMindUrl": "",
   "hiveMindApiKey": "",

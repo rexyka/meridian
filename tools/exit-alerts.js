@@ -1,3 +1,4 @@
+import { config } from "../config.js";
 import { buildSignalSummary, fetchChartIndicatorsForMint } from "./chart-indicators.js";
 import { getGmgnHolderExitSignalsForMint } from "./gmgn.js";
 import { getRecentPositionSnapshots } from "../pool-memory.js";
@@ -6,7 +7,12 @@ import { log } from "../logger.js";
 
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 
+// Recalibrated for current loose rejection-only pullback strategy:
+// - Entry zone is RSI 30-92, BB 0-0.75 — was firing weakness alerts inside entry zone
+// - Old thresholds targeted "exhaustion at top" — now target real capitulation / real dumps only
+// - Override any value via user-config.json → exitAlerts.thresholds.<key>
 const DEFAULTS = {
+  // Take-profit exhaustion signals (unchanged — TP zone semantics haven't shifted)
   tpZonePnlPct: 3,
   tpSeriousPnlPct: 5,
   tpZoneRsi5m: 85,
@@ -14,21 +20,39 @@ const DEFAULTS = {
   tpSeriousRsi15m: 80,
   upperBbPct: 0.8,
   seriousUpperBbPct: 0.85,
-  weaknessRsi5m: 50,
-  weaknessRsi15m: 60,
-  dumpRsi5m: 35,
-  rangePressureBins: 8,
-  rangePressurePct: 0.2,
-  binVelocityDrop: 8,
-  volumeFadeRatio: 0.5,
-  feeDecayMinAgeMinutes: 30,
-  feeDecayLookbackSnapshots: 6,
-  feeDecayMaxFeeGrowthUsd: 0.05,
-  feeDecayMaxFeePerTvl24h: 2,
-  feeDecayMaxPnlPct: 1,
-  liquidityDrainPct: 25,
-  activeTvlDrainPct: 35,
+  // Weakness / dump — TIGHTENED so entry zone stops triggering false alerts
+  weaknessRsi5m: 25,      // was 50 — only real capitulation
+  weaknessRsi15m: 40,     // was 60 — deeper than pullback zone
+  dumpRsi5m: 20,          // was 35 — extreme oversold only
+  // Range pressure — tightened, only near actual edge
+  rangePressureBins: 5,   // was 8
+  rangePressurePct: 0.15, // was 0.2
+  // Bin velocity — only fires on fast drops, not normal movement
+  binVelocityDrop: 15,    // was 8
+  // Volume fade — must be genuine collapse, not quiet phase
+  volumeFadeRatio: 0.30,  // was 0.5
+  // Fee decay — only signal when position is also losing
+  feeDecayMinAgeMinutes: 60,       // was 30 — give position time
+  feeDecayLookbackSnapshots: 8,    // was 6 — smoother
+  feeDecayMaxFeeGrowthUsd: 0.03,   // was 0.05
+  feeDecayMaxFeePerTvl24h: 1.5,    // was 2
+  feeDecayMaxPnlPct: -3,           // was 1 — only when losing
+  // Liquidity drain — tolerate whale movement, catch real exits
+  liquidityDrainPct: 40,  // was 25
+  activeTvlDrainPct: 50,  // was 35
 };
+
+// Merge user-config.json overrides on top of DEFAULTS.
+// user-config.json path: exitAlerts.thresholds.<key>
+// Only keys present in user config override; the rest fall back to DEFAULTS.
+function getThresholds() {
+  const configured = config.exitAlerts?.thresholds || {};
+  const merged = { ...DEFAULTS };
+  for (const key of Object.keys(DEFAULTS)) {
+    if (configured[key] != null) merged[key] = configured[key];
+  }
+  return merged;
+}
 
 function num(value) {
   const n = Number(value);
@@ -232,7 +256,9 @@ function pushAlert(alerts, type, severity, reason, data = {}) {
   alerts.push({ type, severity, reason, data });
 }
 
-export async function evaluateExitAlertsForPosition(position, thresholds = DEFAULTS) {
+export async function evaluateExitAlertsForPosition(position, thresholds = null) {
+  // Resolve thresholds: explicit param wins, else load from user-config with DEFAULTS fallback.
+  thresholds = thresholds || getThresholds();
   if (!position?.base_mint) return [];
 
   let signal5m = null;

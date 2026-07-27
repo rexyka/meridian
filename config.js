@@ -130,6 +130,7 @@ export const config = {
     maxPriceVsRecentHighPct: gmgnValue("maxPriceVsRecentHighPct", "gmgnMaxPriceVsRecentHighPct", 97),
     maxPumpTopBbPositionPct: gmgnValue("maxPumpTopBbPositionPct", "gmgnMaxPumpTopBbPositionPct", 0.9),
     maxPumpTopRsi: gmgnValue("maxPumpTopRsi", "gmgnMaxPumpTopRsi", 85),
+    max1hChangePct: gmgnValue("max1hChangePct", "gmgnMax1hChangePct", 30),
     rejectSingleVolumeSpike: gmgnValue("rejectSingleVolumeSpike", "gmgnRejectSingleVolumeSpike", true),
     maxSingleCandleVolumeShare: gmgnValue("maxSingleCandleVolumeShare", "gmgnMaxSingleCandleVolumeShare", 0.7),
     filters: gmgnArray("filters", "gmgnFilters", ["renounced", "frozen", "not_wash_trading"]),
@@ -334,6 +335,15 @@ export const config = {
     rsiOversold: indicatorUserConfig.rsiOversold ?? 30,
     rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
     requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
+  },
+
+  // Exit alert thresholds — override any DEFAULTS value from tools/exit-alerts.js
+  // by adding to user-config.json:
+  //   "exitAlerts": { "thresholds": { "weaknessRsi5m": 25, ... } }
+  // Only keys explicitly set here override; the rest use DEFAULTS.
+  exitAlerts: {
+    enabled: u.exitAlerts?.enabled ?? true,
+    thresholds: u.exitAlerts?.thresholds ?? {},
   },
 };
 
