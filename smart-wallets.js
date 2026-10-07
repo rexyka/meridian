@@ -52,6 +52,24 @@ export function listSmartWallets() {
 // Cache wallet positions for 5 minutes to avoid hammering RPC
 const _cache = new Map(); // address -> { positions, fetchedAt }
 const CACHE_TTL = 5 * 60 * 1000;
+// Tracked wallet lists can run into the hundreds — firing one RPC call per
+// wallet via Promise.all blasts them all at once and trips Helius's rate
+// limit (429s). Cap how many are in flight at a time instead.
+const POSITION_FETCH_CONCURRENCY = 8;
+
+// Like Promise.all(items.map(fn)), but only runs `limit` calls at a time.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
 
 export async function checkSmartWalletsOnPool({ pool_address }) {
   const { wallets: allWallets } = loadWallets();
@@ -69,21 +87,19 @@ export async function checkSmartWalletsOnPool({ pool_address }) {
 
   const { getWalletPositions } = await import("./tools/dlmm.js");
 
-  const results = await Promise.all(
-    wallets.map(async (wallet) => {
-      try {
-        const cached = _cache.get(wallet.address);
-        if (cached && Date.now() - cached.fetchedAt < CACHE_TTL) {
-          return { wallet, positions: cached.positions };
-        }
-        const { positions } = await getWalletPositions({ wallet_address: wallet.address });
-        _cache.set(wallet.address, { positions: positions || [], fetchedAt: Date.now() });
-        return { wallet, positions: positions || [] };
-      } catch {
-        return { wallet, positions: [] };
+  const results = await mapWithConcurrency(wallets, POSITION_FETCH_CONCURRENCY, async (wallet) => {
+    try {
+      const cached = _cache.get(wallet.address);
+      if (cached && Date.now() - cached.fetchedAt < CACHE_TTL) {
+        return { wallet, positions: cached.positions };
       }
-    })
-  );
+      const { positions } = await getWalletPositions({ wallet_address: wallet.address });
+      _cache.set(wallet.address, { positions: positions || [], fetchedAt: Date.now() });
+      return { wallet, positions: positions || [] };
+    } catch {
+      return { wallet, positions: [] };
+    }
+  });
 
   const inPool = results
     .filter((r) => r.positions.some((p) => p.pool === pool_address))
