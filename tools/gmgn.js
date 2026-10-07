@@ -11,17 +11,28 @@ const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
 const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "6h", "24h"]);
 let lastGmgnRequestAt = 0;
 let _velocityDataLogged = false; // one-time log: confirms 1h price change data is flowing
+// Serializes pacing across concurrent callers (e.g. Promise.all'd holders+traders
+// fetches) — without this, concurrent calls all read the same stale
+// lastGmgnRequestAt before any of them update it, so the spacing is never
+// enforced and GMGN sees request bursts. Every call queues behind the last.
+let gmgnPaceQueue = Promise.resolve();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function paceGmgnRequest() {
-  const delayMs = Math.max(0, Number(config.gmgn?.requestDelayMs ?? 2500));
-  if (!delayMs) return;
-  const elapsed = Date.now() - lastGmgnRequestAt;
-  if (elapsed < delayMs) await sleep(delayMs - elapsed);
-  lastGmgnRequestAt = Date.now();
+function paceGmgnRequest() {
+  const turn = gmgnPaceQueue.then(async () => {
+    const delayMs = Math.max(0, Number(config.gmgn?.requestDelayMs ?? 2500));
+    if (!delayMs) return;
+    const elapsed = Date.now() - lastGmgnRequestAt;
+    if (elapsed < delayMs) await sleep(delayMs - elapsed);
+    lastGmgnRequestAt = Date.now();
+  });
+  // Keep the chain alive even if this turn throws, and never let a caller's
+  // await surface the (unrelated) rejection of some other queued turn.
+  gmgnPaceQueue = turn.catch(() => {});
+  return turn;
 }
 
 function getApiKey() {
