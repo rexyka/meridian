@@ -109,8 +109,8 @@ HARD RULE (no exceptions):
 RISK SIGNALS (guidelines — use judgment):
 - top10 > ${config.screening.maxTop10Pct}% → concentrated, risky
 - PVP symbol conflict (same exact symbol across multiple mints) → major negative. Avoid unless the setup is exceptional and clearly stronger than the competing symbol variants.
-- no narrative + no smart wallets → skip
-- If only one candidate is returned, do not deploy by default. Treat it as "maybe nothing is good enough"; deploy only if it still has a strong narrative, smart-wallet confirmation, and clean pool metrics.
+- Smart wallets present → bonus conviction signal, never a hard requirement.
+- If only one candidate is returned: it has already passed a deterministic pre-check for hard rugpull/PVP/fee/concentration flags using Degen Score conviction (≥${config.screening.loneCandidateMinDegen ?? 50} counts as strong). Narrative OR a strong Degen Score is enough conviction to deploy solo — smart-wallet confirmation is a bonus, not a co-requirement. Only reject it for genuine fundamental weakness (thin/concerning metrics), not merely for missing narrative or smart wallets alone.
 
 NARRATIVE QUALITY (your main judgment call):
 - GOOD: specific origin — real event, viral moment, named entity, active community
